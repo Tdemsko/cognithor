@@ -8,6 +8,7 @@ Gatekeeper makes the fork delta easy to audit and merge with upstream.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +21,30 @@ _RISK_ORDER = {
     RiskLevel.RED: 3,
 }
 
+
+class ActionRiskClass(StrEnum):
+    """Thomas AI action classes, ordered from read-only to catastrophic."""
+
+    R0_READ_ONLY = "R0"
+    R1_DISPOSABLE_SANDBOX = "R1"
+    R2_PROJECT_WRITE = "R2"
+    R3_STAGING_INTEGRATION = "R3"
+    R4_PRODUCTION_EXTERNAL = "R4"
+    R5_DESTRUCTIVE_SECURITY = "R5"
+
+
 HOST_EXECUTION_TOOLS = frozenset(
     {
         "exec_command",
         "shell_exec",
         "shell",
-        "run_python",
         "start_background",
         "remote_exec",
         "docker_run",
     }
 )
+
+SANDBOX_EXECUTION_TOOLS = frozenset({"run_python"})
 
 PROJECT_WRITE_TOOLS = frozenset(
     {
@@ -40,6 +54,7 @@ PROJECT_WRITE_TOOLS = frozenset(
         "find_and_replace",
         "git_branch",
         "git_commit",
+        "document_export",
     }
 )
 
@@ -51,6 +66,27 @@ SELF_MODIFICATION_TOOLS = frozenset(
     }
 )
 
+DESTRUCTIVE_OR_SECURITY_TOOLS = frozenset(
+    {
+        "delete_file",
+        "delete_directory",
+        "vault_delete",
+        "delete_entity",
+        "delete_relation",
+        "erase_user_data",
+        "sudo",
+        "credential_rotate",
+        "credential_delete",
+        "proxmox_delete",
+        "proxmox_destroy",
+        "network_admin",
+        "router_configure",
+        "firmware_update",
+        "purchase",
+        "financial_transfer",
+    }
+)
+
 EXTERNAL_SIDE_EFFECT_TOOLS = frozenset(
     {
         "api_call",
@@ -59,10 +95,14 @@ EXTERNAL_SIDE_EFFECT_TOOLS = frozenset(
         "delegate_to_remote_agent",
         "docker_stop",
         "email_send",
+        "send_email",
         "calendar_create_event",
+        "create_calendar_event",
         "reddit_reply",
         "schedule_job",
         "send_notification",
+        "publish",
+        "deploy_production",
         "stop_background_job",
         "set_clipboard",
         "computer_click",
@@ -159,6 +199,9 @@ SAFE_MODE_READ_ONLY_TOOLS = frozenset(
         "kanban_list_tasks",
         "social_scan",
         "social_leads",
+        "reddit_scan",
+        "reddit_leads",
+        "reddit_refine",
         "canvas_snapshot",
         "code_review",
         "summarize",
@@ -190,6 +233,10 @@ def _is_workspace_scoped(action: PlannedAction, workspace_dir: Path) -> bool:
     tool = action.tool.lower()
     if tool in {"git_branch", "git_commit"} and not str(action.params.get("path", "")).strip():
         return True
+    if tool == "document_export":
+        # MediaPipeline ignores caller-controlled output paths, sanitizes the
+        # filename, and writes beneath <workspace>/media/documents.
+        return True
     if tool == "find_and_replace" and action.params.get("dry_run", True) is True:
         return True
     target = _resolved_workspace_path(action.params, workspace_dir)
@@ -202,21 +249,47 @@ def _is_workspace_scoped(action: PlannedAction, workspace_dir: Path) -> bool:
     return True
 
 
-def risk_floor(action: PlannedAction, workspace_dir: Path) -> RiskLevel:
-    """Return the minimum risk permitted by the home-lab profile."""
+def action_risk_class(action: PlannedAction, workspace_dir: Path) -> ActionRiskClass:
+    """Classify an action independently of model- or registry-provided risk."""
     tool = action.tool.lower()
-    if tool in SELF_MODIFICATION_TOOLS:
-        return RiskLevel.RED
-    if (
-        tool in HOST_EXECUTION_TOOLS
-        or tool in EXTERNAL_SIDE_EFFECT_TOOLS
-        or tool in DURABLE_MEMORY_WRITE_TOOLS
-    ):
-        return RiskLevel.ORANGE
+    if tool in SELF_MODIFICATION_TOOLS or tool in DESTRUCTIVE_OR_SECURITY_TOOLS:
+        return ActionRiskClass.R5_DESTRUCTIVE_SECURITY
+    if tool in SANDBOX_EXECUTION_TOOLS:
+        # These named capabilities are implemented by CodeTools over the
+        # fail-closed SandboxExecutor. Model-supplied "sandbox" claims never
+        # influence this decision.
+        return ActionRiskClass.R1_DISPOSABLE_SANDBOX
+    if tool in HOST_EXECUTION_TOOLS:
+        return ActionRiskClass.R5_DESTRUCTIVE_SECURITY
+    if tool in EXTERNAL_SIDE_EFFECT_TOOLS:
+        return ActionRiskClass.R4_PRODUCTION_EXTERNAL
+    if tool in DURABLE_MEMORY_WRITE_TOOLS:
+        return ActionRiskClass.R3_STAGING_INTEGRATION
     if tool in PROJECT_WRITE_TOOLS:
         if tool == "find_and_replace" and action.params.get("dry_run", True) is True:
-            return RiskLevel.GREEN
-        return RiskLevel.YELLOW if _is_workspace_scoped(action, workspace_dir) else RiskLevel.ORANGE
+            return ActionRiskClass.R0_READ_ONLY
+        if _is_workspace_scoped(action, workspace_dir):
+            return ActionRiskClass.R2_PROJECT_WRITE
+        return ActionRiskClass.R4_PRODUCTION_EXTERNAL
+    if safe_mode_allows(tool):
+        return ActionRiskClass.R0_READ_ONLY
+    return ActionRiskClass.R3_STAGING_INTEGRATION
+
+
+def risk_floor(action: PlannedAction, workspace_dir: Path) -> RiskLevel:
+    """Return the minimum risk permitted by the home-lab profile."""
+    risk_class = action_risk_class(action, workspace_dir)
+    if risk_class == ActionRiskClass.R5_DESTRUCTIVE_SECURITY:
+        return RiskLevel.RED
+    if risk_class == ActionRiskClass.R4_PRODUCTION_EXTERNAL:
+        return RiskLevel.ORANGE
+    if risk_class == ActionRiskClass.R3_STAGING_INTEGRATION:
+        return RiskLevel.ORANGE
+    if risk_class in {
+        ActionRiskClass.R1_DISPOSABLE_SANDBOX,
+        ActionRiskClass.R2_PROJECT_WRITE,
+    }:
+        return RiskLevel.YELLOW
     return RiskLevel.GREEN
 
 

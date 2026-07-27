@@ -346,3 +346,272 @@ residual risk, not hidden by the score.
 This score is a deterministic engineering acceptance rubric for this patch
 scope. It is not a statistical claim of 99.6% reliability and it does not
 assert that later Thomas AI architecture patch sets are already complete.
+
+## Release candidate: Exact-Action Authorization
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+Scope:
+
+- R0-R5 deterministic authorization classes;
+- exact-payload, one-time, expiring approvals;
+- immutable approval/execution snapshots;
+- bounded local break-glass;
+- fail-closed approval timeout behavior;
+- approval provenance fields and events.
+
+### Pre-round engineering checks
+
+The first combined targeted selection exposed seven pre-existing expectations
+that conflicted with the stricter default-deny R3 floor. The affected
+capabilities were unscoped artifact generation, desktop screenshots,
+synthesis, database connection, and an unclassified custom tool. The product
+policy was not weakened. The compatibility tests were split so the genuinely
+R0/R2 cases retain their original assertions, while new security-contract
+tests assert that unscoped/sensitive and unknown tools require approval.
+
+A review of nested model mutability also found that a frozen `PlannedAction`
+still contains mutable dictionaries. The implementation was repaired to use
+three separate objects: the live planner action, a presentation copy, and a
+private deep execution snapshot. Tests now mutate both the planner action and
+the channel presentation object and verify fail-closed behavior.
+
+Current targeted command:
+
+```text
+.venv/bin/python -m pytest -q \
+  tests/test_gateway/test_pge_loop_deep.py \
+  tests/test_gateway/test_gateway.py \
+  tests/test_gateway/test_gateway_coverage.py \
+  tests/test_core/test_gatekeeper.py \
+  tests/test_core/test_models.py \
+  tests/test_core/test_executor.py \
+  tests/test_hitl_manager.py \
+  tests/test_integration/test_v20_hitl.py \
+  tests/security_contracts
+```
+
+Current result:
+
+```text
+697 passed, 0 failed, 1 deprecation warning in 3.94s
+```
+
+This targeted result is pre-round evidence only. It is not a substitute for
+the required three release rounds below.
+
+### Round 1 — static, unit, security contracts, dependencies/config
+
+Status: **PASS**
+
+Static gates passed before the first full run:
+
+- `git diff --check`: pass;
+- Ruff lint: pass;
+- Ruff format: pass;
+- strict mypy: `Success: no issues found in 7 source files`;
+- dependency consistency: `No broken requirements found`;
+- live dependency audit: `No known vulnerabilities found`.
+
+The first full regression was rejected:
+
+```text
+18875 passed, 39 skipped, 15 failed in 781.63s
+```
+
+Failure analysis found:
+
+1. Ten legacy assertions expected model/registry metadata to downgrade raw
+   shell, remote shell, host screenshots, durable identity/goals, or unknown
+   pack tools. Their expected values were replaced with stricter security
+   assertions; product controls were not relaxed.
+2. Five document-creation E2E cases identified a real classification/
+   implementation mismatch. `document_export` was intended as a confined
+   project write but used a hard-coded home directory and was classified as
+   unscoped R3. The implementation now uses the configured media workspace,
+   sanitizes the filename, and the deterministic classifier recognizes only
+   this named confined capability as R2.
+3. The first targeted media retest then caught a `config=None` compatibility
+   defect in the new workspace wiring. It was repaired with the original
+   default-workspace fallback.
+
+Targeted confirmation after repair:
+
+```text
+135 passed, 0 failed, 2 deprecation warnings in 3.90s
+```
+
+A clean full Round 1 rerun is required before PASS.
+
+The initial clean rerun passed:
+
+```text
+18891 passed, 39 skipped, 3547 warnings in 760.21s (0:12:40)
+```
+
+During final review, the approval receipt was found to be present in the
+returned result and run recorder but not guaranteed to be committed to the
+authoritative tamper-evident `AuditTrail` before execution. Acceptance was
+withdrawn and all three rounds were restarted after adding that hard gate.
+
+The first restarted static attempt was rejected because Ruff formatting found
+two files. They were formatted and every static gate was rerun. The first
+restarted full regression then found four failures:
+
+```text
+18890 passed, 39 skipped, 4 failed, 3547 warnings in 742.34s
+```
+
+All four were E2E fixtures that simulated explicit approval while constructing
+a partial Gateway without its required audit trail. Product execution failed
+closed as designed. The fixtures were repaired to use a real HMAC-backed
+append-only `AuditTrail`; the four scenarios then passed without relaxing the
+product control.
+
+The final clean Round 1 rerun passed:
+
+```text
+18894 passed, 39 skipped, 3547 warnings in 757.71s (0:12:37)
+```
+
+Round 1 final result: PASS.
+
+### Round 2 — integration, adversarial, bypass, failure injection
+
+Status: **PASS**
+
+Commands:
+
+```text
+.venv/bin/python -m pytest \
+  tests/security_contracts tests/adversarial tests/test_security \
+  tests/test_gateway/test_pge_loop_deep.py \
+  -q --tb=short
+
+.venv/bin/python -m pytest \
+  tests/test_integration tests/integration tests/test_e2e_scenarios.py \
+  -q --tb=short
+
+.venv/bin/python -m pytest \
+  tests/chaos \
+  tests/test_core/test_worker.py \
+  tests/test_core/test_distributed_lock.py \
+  tests/test_core/test_distributed_lock_coverage.py \
+  tests/test_crew/test_idempotent_kickoff.py \
+  tests/test_cron/test_engine.py \
+  tests/test_core/test_workflow.py \
+  tests/test_core/test_executor.py \
+  tests/test_core/test_executor_coverage.py \
+  tests/test_core/test_llm_retry.py \
+  tests/test_db/test_sqlite_retry.py \
+  -q --tb=short
+```
+
+Results:
+
+- security/adversarial/bypass: `2226 passed, 5 skipped`;
+- integration/E2E: `1421 passed, 2 skipped`;
+- failure/retry/idempotency: `310 passed`;
+- aggregate: `3957 passed, 7 skipped, 0 failed`.
+
+The initial parallel orchestration returned the integration subprocess at 96%
+without a terminal status. It was not counted. The integration command was
+rerun directly and produced the complete passing result above.
+
+### Round 3 — isolated RC, sandbox isolation, rollback, regression
+
+Status: **PASS**
+
+Release suite:
+
+```text
+.venv/bin/python -m pytest tests/release -q --tb=short
+4 passed
+```
+
+An isolated wheel was built:
+
+```text
+.venv/bin/python -m build --wheel --outdir <disposable>/dist
+Successfully built cognithor-0.99.0-py3-none-any.whl
+```
+
+The first disposable-venv probe stopped before product import because that
+venv did not contain PyYAML. The wheel was then installed into an isolated
+target directory and executed from `/private/tmp` with the already-audited
+project dependencies. The probe asserted that `cognithor.__file__` resolved
+from `wheel-target`, not the source checkout. Its first audit-chain assertion
+used `None` instead of the API's documented intact-chain sentinel `-1`; the
+probe was corrected and rerun. No product code changed for either probe setup
+failure.
+
+Installed-wheel results:
+
+```text
+exact_payload_mutation=PASS
+risk_floors=PASS
+document_workspace_confinement=PASS
+approval_audit_chain=PASS
+sandbox_level=bare
+sandbox_fail_closed=PASS
+```
+
+The sandbox probe attempted to create a marker file. With no bwrap, Firejail,
+or Windows Job Object available on the macOS release host, execution returned
+the expected refusal and no marker was created.
+
+Rollback/restore:
+
+```text
+.venv/bin/python -m pytest \
+  tests/test_governance/test_policy_patcher.py \
+  tests/test_governance/test_policy_patcher_ext.py \
+  tests/test_packs/test_installer.py \
+  tests/test_system/test_hardware_aware_runtime.py \
+  tests/test_core/test_checkpoint.py \
+  tests/test_integration/test_v18_graph_orchestrator.py \
+  tests/security_contracts/test_inv5_audit_chain_integrity.py \
+  tests/test_evolution_orchestrator.py \
+  -q --tb=short
+
+214 passed
+```
+
+Separately isolated voice-WebSocket suite:
+
+```text
+16 passed
+```
+
+Final independent regression:
+
+```text
+18894 passed, 39 skipped, 3547 warnings in 745.31s (0:12:25)
+```
+
+The full suite rewrote upstream sample-skill fixtures and created six
+MagicMock-named SQLite artifacts over the three full regressions in this
+candidate's complete history (two per run). Each was identified as
+test-generated, restored/removed, and excluded from the release diff before
+final static validation.
+
+### Acceptance score
+
+All hard gates passed. Zero unresolved Critical or High findings.
+
+| Dimension | Weight | Result | Weighted |
+|---|---:|---:|---:|
+| Deterministic R0-R5 and exact-action authorization | 40 | 100.0 | 40.000 |
+| Regression and compatibility | 20 | 100.0 | 20.000 |
+| Adversarial, bypass, integration, failure behavior | 20 | 100.0 | 20.000 |
+| Packaging, isolation, rollback, recovery | 15 | 97.5 | 14.625 |
+| Evidence, maintainability, upstream discipline | 5 | 100.0 | 5.000 |
+| **Total** | **100** |  | **99.625 / 100** |
+
+Reported release score: **99.625/100 — PASS**
+
+The 2.5-point deduction inside the packaging/isolation category reflects the
+absence of a Linux namespace/container runtime on this macOS validation host.
+The installed wheel proved fail-closed refusal. A real Ubuntu isolation and
+private-network-egress test remains a mandatory deployment gate and is not
+represented as complete.

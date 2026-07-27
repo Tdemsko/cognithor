@@ -43,7 +43,11 @@ log = get_logger(__name__)
 class ApprovalManager:
     """Zentrale Verwaltung fuer HITL-Approval-Workflows."""
 
-    def __init__(self, notifier: HITLNotifier | None = None, max_pending: int = 500) -> None:
+    def __init__(
+        self,
+        notifier: HITLNotifier | None = None,
+        max_pending: int = 500,
+    ) -> None:
         self._notifier = notifier or HITLNotifier()
         self._tasks: dict[str, ReviewTask] = {}  # request_id → task
         self._by_execution: dict[str, list[str]] = {}  # execution_id → [request_ids]
@@ -224,13 +228,19 @@ class ApprovalManager:
         self._total_escalated += 1
 
         if action == EscalationAction.AUTO_APPROVE:
-            response = ApprovalResponse(
+            # A timeout is absence of human authorization, never authorization.
+            # This remains fail-closed even when an inherited workflow selects
+            # the legacy AUTO_APPROVE escalation enum.
+            task.request.status = ApprovalStatus.TIMED_OUT
+            self._total_timed_out += 1
+            log.error(
+                "hitl_timeout_auto_approve_blocked",
                 request_id=request_id,
-                decision=ApprovalStatus.APPROVED,
-                reviewer="__auto__",
-                comment="Auto-approved after timeout",
             )
-            await self.respond(request_id, response)
+            event = self._resolved_callbacks.get(request_id)
+            if event:
+                event.set()
+            return
 
         elif action == EscalationAction.AUTO_REJECT:
             response = ApprovalResponse(

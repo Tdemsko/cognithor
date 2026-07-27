@@ -37,10 +37,10 @@ def test_risk_ceiling_allows_green_with_yellow_ceiling(gk, ctx):
     assert decision.status != GateStatus.BLOCK
 
 
-def test_risk_ceiling_allows_yellow_with_yellow_ceiling(gk, ctx):
-    """A YELLOW tool should pass when ceiling is YELLOW."""
+def test_risk_ceiling_blocks_durable_goals_with_yellow_ceiling(gk, ctx):
+    """Durable goal mutation is R3/ORANGE and exceeds a YELLOW ceiling."""
     decision = gk.evaluate(_action("atl_goals"), ctx, risk_ceiling="YELLOW")
-    assert decision.status != GateStatus.BLOCK
+    assert decision.status == GateStatus.BLOCK
 
 
 def test_risk_ceiling_blocks_yellow_with_green_ceiling(gk, ctx):
@@ -66,6 +66,7 @@ def test_atl_tools_classified(gk, ctx):
     d2 = gk.evaluate(_action("atl_journal"), ctx)
     assert d2.risk_level == RiskLevel.GREEN
 
-    # atl_goals = YELLOW
+    # atl_goals mutates durable state and therefore requires approval.
     d3 = gk.evaluate(_action("atl_goals"), ctx)
-    assert d3.risk_level == RiskLevel.YELLOW
+    assert d3.risk_level == RiskLevel.ORANGE
+    assert d3.status == GateStatus.APPROVE

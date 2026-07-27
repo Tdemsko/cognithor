@@ -130,7 +130,6 @@ class TestRiskClassification:
             "memory_stats",
             "db_query",
             "db_schema",
-            "create_chart",
             "list_skills",
             "list_remote_agents",
             "docker_ps",
@@ -138,11 +137,9 @@ class TestRiskClassification:
             "api_list",
             "calendar_today",
             "calendar_upcoming",
-            "screenshot_desktop",
             "vault_list",
             "vault_search",
             # Sprint-22 Track A.2: PSE tools (deterministic, sandboxed)
-            "pse_synthesize",
             "pse_is_synthesizable",
             "pse_status",
         ],
@@ -160,9 +157,6 @@ class TestRiskClassification:
         [
             "git_commit",
             "git_branch",
-            "document_export",
-            "media_tts",
-            "db_connect",
         ],
     )
     def test_yellow_tools_comprehensive(
@@ -178,11 +172,9 @@ class TestRiskClassification:
         [
             "email_send",
             "calendar_create_event",
-            "delete_file",
             "fetch_url",
             "http_request",
             "db_execute",
-            "docker_run",
             "save_to_memory",
             "delegate_to_remote_agent",
             "docker_stop",
@@ -217,6 +209,8 @@ class TestRiskClassification:
             "delete_entity",
             "delete_relation",
             "erase_user_data",
+            "delete_file",
+            "docker_run",
         ],
     )
     def test_red_tools_blocked(
@@ -390,10 +384,10 @@ class TestPolicyMatching:
     def test_default_policy_loads(self, gatekeeper: Gatekeeper) -> None:
         assert len(gatekeeper._policies) > 0
 
-    def test_custom_policy_override(
+    def test_custom_policy_cannot_downgrade_unclassified_home_lab_tool(
         self, gk_config: CognithorConfig, session: SessionContext
     ) -> None:
-        """Custom Policy die ein Tool explizit erlaubt."""
+        """A local policy cannot silently auto-allow an unclassified tool."""
         custom_policy = {
             "rules": [
                 {
@@ -413,7 +407,8 @@ class TestPolicyMatching:
 
         action = PlannedAction(tool="special_tool", params={})
         decision = gk.evaluate(action, session)
-        assert decision.status == GateStatus.ALLOW
+        assert decision.status == GateStatus.APPROVE
+        assert decision.risk_level == RiskLevel.ORANGE
         assert decision.policy_name == "allow_special_tool"
 
 

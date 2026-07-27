@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import weakref
 from datetime import UTC, datetime
 from pathlib import Path
@@ -443,8 +444,28 @@ class Gatekeeper:
             return False
         env_name = getattr(security, "break_glass_env_var", "")
         if env_name and os.environ.get(env_name) == "I_UNDERSTAND_THIS_BYPASSES_SAFE_MODE":
-            log.critical("local_break_glass_active", env_var=env_name)
-            return False
+            expires_raw = os.environ.get(f"{env_name}_EXPIRES_AT", "")
+            reason = os.environ.get(f"{env_name}_REASON", "").strip()
+            try:
+                expires_at = float(expires_raw)
+            except (TypeError, ValueError):
+                expires_at = 0.0
+            now = time.time()
+            max_ttl = float(getattr(security, "break_glass_max_ttl_seconds", 900))
+            if reason and now < expires_at <= now + max_ttl:
+                log.critical(
+                    "local_break_glass_active",
+                    env_var=env_name,
+                    reason=reason[:200],
+                    expires_at=expires_at,
+                )
+                return False
+            log.error(
+                "local_break_glass_invalid",
+                env_var=env_name,
+                has_reason=bool(reason),
+                expires_at=expires_at,
+            )
         return True
 
     def reload_disabled_tools(self) -> None:

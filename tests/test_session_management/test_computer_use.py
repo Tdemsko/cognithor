@@ -29,8 +29,8 @@ def test_computer_use_gatekeeper_classification():
 
     # Screenshot is read-only → GREEN
     ss_action = PlannedAction(tool="computer_screenshot", params={}, rationale="test")
-    assert gk_enabled._classify_risk(ss_action).value == "green", (
-        "computer_screenshot should be green"
+    assert gk_enabled._classify_risk(ss_action).value == "orange", (
+        "host computer_screenshot should require approval"
     )
 
     # Active desktop actions → ORANGE (not RED, not GREEN)

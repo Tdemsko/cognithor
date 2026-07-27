@@ -111,8 +111,8 @@ class TestGatekeeperToolRegistryIntegration:
         result = gk._classify_risk(self._make_action("totally_new_tool"))
         assert result == RiskLevel.ORANGE
 
-    def test_annotation_overrides_hardcoded(self):
-        """Annotation takes priority over hardcoded list."""
+    def test_annotation_cannot_downgrade_home_lab_floor(self):
+        """Registry annotations cannot weaken deterministic host-shell policy."""
         gk = self._make_gatekeeper()
         # exec_command is GREEN in hardcoded list, but annotate as orange
         registry = {
@@ -123,4 +123,4 @@ class TestGatekeeperToolRegistryIntegration:
         from cognithor.core.gatekeeper import RiskLevel
 
         result = gk._classify_risk(self._make_action("exec_command"))
-        assert result == RiskLevel.ORANGE
+        assert result == RiskLevel.RED

@@ -694,8 +694,8 @@ class TestPGEToolExecution:
         assert (sandbox / "info.txt").exists()
 
     @pytest.mark.asyncio
-    async def test_exec_command_requires_approval(self, pge_env):
-        """Host command execution remains approval-gated even with a sandbox configured."""
+    async def test_exec_command_is_blocked(self, pge_env):
+        """Raw host command execution is unavailable to the model-facing path."""
         config, _sandbox = pge_env
         gatekeeper = Gatekeeper(config)
         gatekeeper.initialize()
@@ -707,8 +707,8 @@ class TestPGEToolExecution:
         )
         session = SessionContext(user_id="alex", channel="cli")
         decision = gatekeeper.evaluate(action, session)
-        assert decision.risk_level == RiskLevel.ORANGE
-        assert decision.status == GateStatus.APPROVE
+        assert decision.risk_level == RiskLevel.RED
+        assert decision.status == GateStatus.BLOCK
 
 
 # =============================================================================

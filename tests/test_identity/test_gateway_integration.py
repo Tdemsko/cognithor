@@ -66,11 +66,12 @@ class TestGatekeeperGenesisAnchors:
         cfg = CognithorConfig(cognithor_home=tempfile.mkdtemp())
         gk = Gatekeeper(cfg)
 
-        for tool in ["identity_recall", "identity_state", "identity_reflect"]:
+        for tool in ["identity_recall", "identity_state"]:
             action = PlannedAction(tool=tool, params={})
             assert gk._classify_risk(action) == RiskLevel.GREEN, f"{tool} should be GREEN"
-        dream = PlannedAction(tool="identity_dream", params={})
-        assert gk._classify_risk(dream) == RiskLevel.ORANGE
+        for tool in ["identity_reflect", "identity_dream"]:
+            action = PlannedAction(tool=tool, params={})
+            assert gk._classify_risk(action) == RiskLevel.ORANGE
 
 
 class TestIdentityPhaseInit:

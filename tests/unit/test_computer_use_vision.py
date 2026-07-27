@@ -109,7 +109,7 @@ class TestComputerScreenshotWithVision:
 class TestGatekeeperCUClassification:
     """Verify security classification hasn't regressed."""
 
-    def test_screenshot_green_actions_orange(self):
+    def test_host_screenshot_and_actions_require_approval(self):
         from cognithor.config import CognithorConfig, ToolsConfig
         from cognithor.core.gatekeeper import Gatekeeper
         from cognithor.models import PlannedAction
@@ -117,9 +117,9 @@ class TestGatekeeperCUClassification:
         config = CognithorConfig(tools=ToolsConfig(computer_use_enabled=True))
         gk = Gatekeeper(config)
 
-        # Screenshot is GREEN (read-only)
+        # Host screenshots are read-only but privacy-sensitive.
         action = PlannedAction(tool="computer_screenshot", params={}, rationale="test")
-        assert gk._classify_risk(action).name == "GREEN"
+        assert gk._classify_risk(action).name == "ORANGE"
 
         # Active actions require approval (ORANGE, not GREEN).
         for tool in ["computer_click", "computer_type", "computer_hotkey"]:

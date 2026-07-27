@@ -313,6 +313,9 @@ class GateDecision(BaseModel, frozen=True):
     original_action: PlannedAction | None = None  # Referenz auf geprüfte Aktion
     masked_params: dict[str, Any] | None = None  # Params nach Credential-Maskierung
     confidence_score: float | None = None  # Pre-execution confidence (0.0-1.0)
+    action_risk_class: str = ""  # Thomas AI R0-R5 authorization class
+    approval_id: str = ""  # Exact-payload approval receipt, when applicable
+    approved_payload_hash: str = ""  # SHA-256 bound to the approval
     timestamp: datetime = Field(default_factory=_utc_now)
 
     @property
@@ -375,6 +378,10 @@ class AuditEntry(BaseModel, frozen=True):
     policy_name: str = ""
     # Optional
     user_override: bool = False
+    event_type: str = "gate_decision"
+    action_risk_class: str = ""
+    approval_id: str = ""
+    approved_payload_hash: str = ""
     execution_result: str | None = None
     error: str | None = None
 

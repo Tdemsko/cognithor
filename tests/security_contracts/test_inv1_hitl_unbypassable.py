@@ -162,12 +162,9 @@ async def test_fake_channel_default_is_false():
 ORANGE_TOOLS = [
     "email_send",
     "calendar_create_event",
-    "delete_file",
     "fetch_url",
     "http_request",
     "db_execute",
-    "docker_run",
-    "remote_exec",
     "browse_click",
     "browse_fill",
     "browse_execute_js",
@@ -193,7 +190,15 @@ def test_orange_tool_parametrized(tool, gatekeeper, session):
 # ---------------------------------------------------------------------------
 
 
-RED_TOOLS = ["vault_delete", "delete_entity", "delete_relation", "erase_user_data"]
+RED_TOOLS = [
+    "vault_delete",
+    "delete_entity",
+    "delete_relation",
+    "erase_user_data",
+    "delete_file",
+    "docker_run",
+    "remote_exec",
+]
 
 
 @pytest.mark.parametrize("tool", RED_TOOLS)

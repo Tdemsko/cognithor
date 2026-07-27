@@ -50,20 +50,34 @@ This profile is for one operator in a home network:
 15. Dependencies with a known unresolved vulnerability are not accepted merely
     because they are optional. The identity extra currently pins ChromaDB to
     the audited pre-1.0 line while the affected 1.x line has no fixed release.
+16. Human approval is one-shot, short-lived, session-bound, risk-bound, and
+    bound to the canonical SHA-256 of the exact executable tool payload.
+17. Planner, channel, or callback mutation after an approval intent is issued
+    invalidates authorization. Execution uses a private deep snapshot, never
+    the mutable plan or presentation object.
+18. An approval timeout is absence of authorization and always fails closed.
+19. Unknown/new tools default to R3/approval until added to the deterministic
+    home-lab classifier and covered by a security-contract test.
+20. An approved action is recorded in the authoritative append-only audit
+    chain before execution. If the required audit trail is absent or its write
+    fails, the approved action is converted to BLOCK and never reaches the
+    executor.
 
 ## Risk policy
 
 | Class | Meaning | Default |
 |---|---|---|
-| R0 / GREEN | Explicit read-only operation | Automatic |
-| R1 / YELLOW | Disposable/project-scoped write | Automatic + inform |
-| R2 / ORANGE | Host execution, broad write, or external side effect | Approval |
-| R3-R5 / RED | Self-modification, destructive, credential/security action | Block |
+| R0 | Explicitly classified read-only operation | Automatic |
+| R1 | Named fail-closed disposable-sandbox execution | Automatic + inform |
+| R2 | Deterministically project-scoped branch/workspace write | Automatic + inform |
+| R3 | Staging, durable-memory, integration, or unknown capability | Approval |
+| R4 | Production/external send, publish, device, UI, or broad write | Explicit approval |
+| R5 | Host shell, raw Docker/remote execution, self-modification, destructive, security, credential, firmware, or financial action | Block |
 
-The existing four-level Cognithor model is retained in the first hardening
-release. Exact R0-R5 policy objects and exact-payload approval grants are a
-subsequent coherent patch set; until then, the mapping above intentionally
-errs toward approval/blocking.
+The R0-R5 class is an authorization class independent of model estimates,
+registry metadata, or local YAML policy. Cognithor's existing GREEN/YELLOW/
+ORANGE/RED decision is raised to at least the deterministic class floor. R5 is
+not made executable by ordinary approval.
 
 ## First release-candidate scope
 
@@ -85,6 +99,44 @@ The Home-Lab Security Baseline release candidate covers:
 Exact-payload approvals, secret brokering, retrieval provenance, durable worker
 leases/idempotency, and append-only cross-system run provenance remain required
 follow-up release candidates. They must not be represented as complete here.
+
+## Second release-candidate scope
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+The Exact-Action Authorization release candidate adds:
+
+- deterministic R0-R5 action classification with approval-by-default for
+  unknown tools;
+- canonical tool-and-parameter hashing for exact-payload approvals;
+- session, risk-class, expiration, target/payload, and one-shot replay binding;
+- separate deep copies for the planner action, approval presentation, and
+  executable approved snapshot;
+- fail-closed handling for prompt-time mutation, UI/channel mutation,
+  expiration, transport failure, rejection, and replay;
+- bounded local break-glass requiring an exact acknowledgement, reason, and
+  near-term expiry;
+- permanent rejection of legacy timeout auto-approval;
+- approval receipt fields in Gate decisions and append-only audit events;
+- HMAC-capable authoritative approval-resolution recording before execution,
+  with fail-closed behavior for missing or failed required audit storage.
+
+All three rounds in `TEST_EVIDENCE.md` passed on 2026-07-26.
+
+- Round 1 final regression: 18,894 passed, 39 skipped, zero failed.
+- Round 2 adversarial/integration/failure testing: 3,957 passed, 7 skipped,
+  zero failed.
+- Round 3 installed-wheel, rollback/restore, voice-WebSocket, and final
+  regression: 19,128 passed, 39 skipped, zero failed across the recorded
+  non-overlapping commands.
+- Weighted release score: 99.625/100.
+- Unresolved Critical findings: zero.
+- Unresolved High findings: zero.
+
+The macOS release host proved fail-closed refusal when no secure isolation
+backend is available. A live Ubuntu bubblewrap/container escape and private
+network-isolation run remains a mandatory deployment gate, as it was for the
+first baseline release.
 
 ## Accepted evidence for this release candidate
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -64,8 +65,8 @@ def test_host_execution_cannot_be_downgraded_by_registry_annotation(tmp_path) ->
 
     decision = _decision(gatekeeper, "exec_command", command="echo safe")
 
-    assert decision.risk_level == RiskLevel.ORANGE
-    assert decision.status == GateStatus.APPROVE
+    assert decision.risk_level == RiskLevel.RED
+    assert decision.status == GateStatus.BLOCK
 
 
 def test_host_execution_cannot_be_downgraded_by_explicit_policy(tmp_path) -> None:
@@ -85,8 +86,8 @@ def test_host_execution_cannot_be_downgraded_by_explicit_policy(tmp_path) -> Non
     decision = _decision(gatekeeper, "exec_command", command="echo bypass")
 
     assert decision.policy_name == "unsafe-local-override"
-    assert decision.risk_level == RiskLevel.ORANGE
-    assert decision.status == GateStatus.APPROVE
+    assert decision.risk_level == RiskLevel.RED
+    assert decision.status == GateStatus.BLOCK
 
 
 def test_workspace_write_is_controlled_but_automatic(tmp_path) -> None:
@@ -136,8 +137,8 @@ def test_model_rationale_and_risk_estimate_cannot_downgrade_host_execution(tmp_p
 
     decision = gatekeeper.evaluate(action, SessionContext())
 
-    assert decision.risk_level == RiskLevel.ORANGE
-    assert decision.status == GateStatus.APPROVE
+    assert decision.risk_level == RiskLevel.RED
+    assert decision.status == GateStatus.BLOCK
 
 
 @pytest.mark.parametrize(
@@ -270,11 +271,46 @@ def test_break_glass_is_local_environment_only(tmp_path, monkeypatch) -> None:
         config.security.break_glass_env_var,
         "I_UNDERSTAND_THIS_BYPASSES_SAFE_MODE",
     )
+    monkeypatch.setenv(
+        f"{config.security.break_glass_env_var}_EXPIRES_AT",
+        str(time.time() + 300),
+    )
+    monkeypatch.setenv(
+        f"{config.security.break_glass_env_var}_REASON",
+        "local recovery test",
+    )
 
     decision = _decision(gatekeeper, "write_file", path="output.txt", content="allowed")
 
     assert decision.policy_name != "global_safe_mode"
     assert decision.status == GateStatus.INFORM
+
+
+@pytest.mark.parametrize(
+    ("expires_offset", "reason"),
+    [
+        (-1, "expired"),
+        (7200, "too far in future"),
+        (300, ""),
+    ],
+)
+def test_invalid_break_glass_never_bypasses_safe_mode(
+    expires_offset: int,
+    reason: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    gatekeeper, config = _gatekeeper(tmp_path)
+    config.security.safe_mode = True
+    env_name = config.security.break_glass_env_var
+    monkeypatch.setenv(env_name, "I_UNDERSTAND_THIS_BYPASSES_SAFE_MODE")
+    monkeypatch.setenv(f"{env_name}_EXPIRES_AT", str(time.time() + expires_offset))
+    monkeypatch.setenv(f"{env_name}_REASON", reason)
+
+    decision = _decision(gatekeeper, "write_file", path="output.txt", content="blocked")
+
+    assert decision.status == GateStatus.BLOCK
+    assert decision.policy_name == "global_safe_mode"
 
 
 def test_required_gatekeeper_component_failure_aborts_startup(tmp_path) -> None:

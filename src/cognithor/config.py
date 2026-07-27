@@ -2037,13 +2037,25 @@ class SecurityConfig(BaseModel):
     break_glass_env_var: str = Field(
         default="COGNITHOR_LOCAL_BREAK_GLASS",
         description=(
-            "Local administrator environment variable. The exact value "
-            "'I_UNDERSTAND_THIS_BYPASSES_SAFE_MODE' temporarily bypasses safe mode."
+            "Local administrator acknowledgement environment variable. A valid, "
+            "short-lived expiry and non-empty reason are also required."
         ),
+    )
+    break_glass_max_ttl_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=3600,
+        description="Maximum future lifetime of a local safe-mode break-glass activation.",
     )
     require_security_controls: bool = Field(
         default=True,
         description="Refuse startup/runtime operation when a required security control fails.",
+    )
+    approval_ttl_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="Maximum lifetime of an exact-payload approval intent.",
     )
     allow_sandbox_network: bool = Field(
         default=False,

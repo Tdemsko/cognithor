@@ -26,6 +26,7 @@ import contextlib
 import hashlib
 import json as _json
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cognithor.gateway.gateway import (
@@ -44,6 +45,12 @@ from cognithor.models import (
     MessageRole,
     ToolResult,
 )
+from cognithor.security.approvals import (
+    ApprovalBindingError,
+    ExactPayloadApprovalAuthority,
+    action_payload_hash,
+)
+from cognithor.security.home_lab import action_risk_class
 from cognithor.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -613,6 +620,79 @@ async def run_pge_loop(
             msg.channel,
             ws_session_id=msg.session_id,
         )
+        security_config = getattr(getattr(gw, "_config", None), "security", None)
+        audit_required = getattr(security_config, "require_security_controls", False) is True
+        audit_trail = getattr(gw, "_audit_trail", None)
+        for approval_index, (step, before, after) in enumerate(
+            zip(
+                plan.steps,
+                decisions,
+                approved_decisions,
+                strict=False,
+            )
+        ):
+            if before.status != GateStatus.APPROVE:
+                continue
+            approval_entry = AuditEntry(
+                session_id=session.session_id,
+                action_tool=step.tool,
+                action_params_hash=after.approved_payload_hash
+                or hashlib.sha256(
+                    _json.dumps(step.params, sort_keys=True, default=str).encode()
+                ).hexdigest(),
+                decision_status=after.status,
+                decision_reason=after.reason,
+                risk_level=after.risk_level,
+                policy_name=after.policy_name,
+                user_override=after.is_allowed,
+                event_type="approval_resolution",
+                action_risk_class=after.action_risk_class,
+                approval_id=after.approval_id,
+                approved_payload_hash=after.approved_payload_hash,
+            )
+            audit_failure = ""
+            if audit_trail is not None:
+                try:
+                    audit_trail.record(approval_entry)
+                except Exception as exc:
+                    audit_failure = f"audit_write_failed:{type(exc).__name__}"
+                    log.exception(
+                        "approval_audit_write_failed",
+                        approval_id=after.approval_id,
+                    )
+            elif audit_required:
+                audit_failure = "audit_trail_unavailable"
+
+            if audit_failure and after.is_allowed:
+                after = GateDecision(
+                    status=GateStatus.BLOCK,
+                    reason=(
+                        f"Required approval audit failed closed ({audit_failure}): {after.reason}"
+                    ),
+                    risk_level=after.risk_level,
+                    original_action=after.original_action,
+                    policy_name=f"{after.policy_name}:approval_audit_failed",
+                    action_risk_class=after.action_risk_class,
+                    approval_id=after.approval_id,
+                    approved_payload_hash=after.approved_payload_hash,
+                )
+                approved_decisions[approval_index] = after
+                approval_entry = approval_entry.model_copy(
+                    update={
+                        "decision_status": GateStatus.BLOCK,
+                        "decision_reason": after.reason,
+                        "policy_name": after.policy_name,
+                        "user_override": False,
+                        "error": audit_failure,
+                    }
+                )
+                log.critical(
+                    "approval_blocked_without_authoritative_audit",
+                    approval_id=after.approval_id,
+                    failure=audit_failure,
+                )
+
+            all_audit.append(approval_entry)
 
         _n_blocked = sum(1 for d in approved_decisions if d.status == GateStatus.BLOCK)
         _n_allowed = sum(1 for d in approved_decisions if d.status != GateStatus.BLOCK)
@@ -726,7 +806,13 @@ async def run_pge_loop(
             gw._executor.set_fact_question_context(True)
 
         try:
-            results = await gw._executor.execute(plan.steps, approved_decisions)
+            # Execute the immutable action snapshot actually evaluated/approved,
+            # never a mutable plan-list replacement made while HITL was pending.
+            execution_steps = [
+                decision.original_action or step
+                for step, decision in zip(plan.steps, approved_decisions, strict=False)
+            ]
+            results = await gw._executor.execute(execution_steps, approved_decisions)
         finally:
             gw._executor.clear_agent_context()
 
@@ -1027,39 +1113,113 @@ async def handle_approvals(
     # Use client-facing session ID for WS connection lookup
     _approval_sid = ws_session_id or session.session_id
     result = list(decisions)  # Kopie
+    config = getattr(gw, "_config", None)
+    security = getattr(config, "security", None)
+    configured_ttl = getattr(security, "approval_ttl_seconds", 300)
+    approval_ttl = float(configured_ttl) if isinstance(configured_ttl, int | float) else 300.0
+    configured_workspace = getattr(config, "workspace_dir", None)
+    workspace_dir = configured_workspace if isinstance(configured_workspace, Path) else Path.cwd()
+    authority = ExactPayloadApprovalAuthority(ttl_seconds=approval_ttl)
 
     for i, (step, decision) in enumerate(zip(steps, decisions, strict=False)):
         if decision.status != GateStatus.APPROVE:
+            continue
+
+        try:
+            # Pydantic's frozen model prevents field reassignment, but nested
+            # dict/list values remain mutable.  Bind the human prompt and the
+            # eventual execution decision to a deep snapshot.
+            approved_snapshot = step.model_copy(deep=True)
+            presented_action = approved_snapshot.model_copy(deep=True)
+            risk_class = action_risk_class(approved_snapshot, workspace_dir)
+            intent = authority.issue(
+                session_id=_approval_sid,
+                action=approved_snapshot,
+                risk_class=risk_class,
+            )
+        except (ApprovalBindingError, AttributeError, RuntimeError, ValueError) as exc:
+            result[i] = GateDecision(
+                status=GateStatus.BLOCK,
+                reason=f"Approval binding failed closed: {type(exc).__name__}",
+                risk_level=decision.risk_level,
+                original_action=decision.original_action,
+                policy_name=f"{decision.policy_name}:approval_binding_failed",
+                action_risk_class="",
+            )
+            log.error(
+                "approval_binding_failed",
+                tool=step.tool,
+                error_type=type(exc).__name__,
+            )
             continue
 
         # User fragen
         try:
             approved = await channel.request_approval(
                 session_id=_approval_sid,
-                action=step,
-                reason=decision.reason,
+                action=presented_action,
+                reason=f"{decision.reason}{intent.prompt_suffix()}",
             )
         except Exception:
             log.warning("approval_request_failed", tool=step.tool, exc_info=True)
             approved = False
 
-        if approved:
+        # Verify both the planner-owned action and the separate action object
+        # handed across the channel boundary.  A channel must not be able to
+        # mutate the private execution snapshot or approve altered content.
+        verification_action = step
+        try:
+            if action_payload_hash(presented_action) != intent.payload_hash:
+                verification_action = presented_action
+        except ApprovalBindingError:
+            verification_action = presented_action
+
+        resolution = authority.resolve(
+            approval_id=intent.approval_id,
+            approved=bool(approved),
+            session_id=_approval_sid,
+            action=verification_action,
+            risk_class=action_risk_class(verification_action, workspace_dir),
+        )
+        if resolution.authorized:
             result[i] = GateDecision(
                 status=GateStatus.ALLOW,
-                reason=f"User-Bestätigung für: {decision.reason}",
+                reason=(
+                    f"Exact-payload user approval {intent.approval_id} "
+                    f"for {intent.payload_hash}: {decision.reason}"
+                ),
                 risk_level=decision.risk_level,
-                original_action=step,
-                policy_name=f"{decision.policy_name}:user_approved",
+                original_action=approved_snapshot,
+                policy_name=f"{decision.policy_name}:user_approved:exact_payload",
+                action_risk_class=intent.risk_class.value,
+                approval_id=intent.approval_id,
+                approved_payload_hash=intent.payload_hash,
             )
-            log.info("user_approved_action", tool=step.tool)
+            log.info(
+                "user_approved_action",
+                tool=step.tool,
+                approval_id=intent.approval_id,
+                payload_hash=intent.payload_hash,
+                risk_class=intent.risk_class.value,
+            )
         else:
             result[i] = GateDecision(
                 status=GateStatus.BLOCK,
-                reason=f"User-Ablehnung für: {decision.reason}",
+                reason=f"Approval denied ({resolution.reason}): {decision.reason}",
                 risk_level=decision.risk_level,
-                original_action=step,
-                policy_name=f"{decision.policy_name}:user_rejected",
+                original_action=approved_snapshot,
+                policy_name=f"{decision.policy_name}:user_rejected:{resolution.reason}",
+                action_risk_class=intent.risk_class.value,
+                approval_id=intent.approval_id,
+                approved_payload_hash=intent.payload_hash,
             )
-            log.info("user_rejected_action", tool=step.tool)
+            log.info(
+                "user_rejected_action",
+                tool=step.tool,
+                approval_id=intent.approval_id,
+                payload_hash=intent.payload_hash,
+                risk_class=intent.risk_class.value,
+                denial_reason=resolution.reason,
+            )
 
     return result

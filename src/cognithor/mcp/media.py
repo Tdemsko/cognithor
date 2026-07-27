@@ -1234,8 +1234,10 @@ class MediaPipeline:
         if not content.strip():
             return MediaResult(success=False, error=t("media.empty_content"))
 
-        # Sicheres Verzeichnis
-        doc_dir = Path.home() / ".cognithor" / "workspace" / "documents"
+        # Keep generated artifacts inside this pipeline's configured
+        # workspace. The authorization layer relies on this confinement when
+        # classifying document_export as an R2 project-scoped write.
+        doc_dir = self._workspace / "documents"
         doc_dir.mkdir(parents=True, exist_ok=True)
 
         # Dateinamen bereinigen
@@ -2544,7 +2546,8 @@ def register_media_tools(mcp_client: Any, config: Any = None) -> MediaPipeline:
         else "http://localhost:11434"
     )
 
-    pipeline = MediaPipeline(config=config)
+    media_workspace = config.workspace_dir / "media" if config is not None else None
+    pipeline = MediaPipeline(workspace_dir=media_workspace, config=config)
 
     async def _transcribe(
         audio_path: str, language: str = "de", model: str = "base", **_: Any

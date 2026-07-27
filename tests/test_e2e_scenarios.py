@@ -46,6 +46,7 @@ from cognithor.core.gatekeeper import Gatekeeper
 from cognithor.core.planner import Planner
 from cognithor.gateway.gateway import Gateway
 from cognithor.models import IncomingMessage
+from cognithor.security.audit import AuditTrail
 
 # =============================================================================
 # Helpers
@@ -154,6 +155,11 @@ def gateway_with_mocks(tmp_path):
     gw._mcp_client = mock_mcp
     gw._ollama = mock_ollama
     gw._model_router = mock_router
+    gw._audit_trail = AuditTrail(
+        log_dir=tmp_path / ".cognithor" / "logs",
+        hmac_key=b"cognithor-e2e-test-audit-key",
+        verify_on_startup=True,
+    )
     gw._running = True
 
     return gw, mock_ollama, mock_mcp, tmp_path
@@ -230,6 +236,11 @@ def gateway_extended_tools(tmp_path):
     gw._mcp_client = mock_mcp
     gw._ollama = mock_ollama
     gw._model_router = mock_router
+    gw._audit_trail = AuditTrail(
+        log_dir=tmp_path / ".cognithor" / "logs",
+        hmac_key=b"cognithor-e2e-test-audit-key",
+        verify_on_startup=True,
+    )
     gw._running = True
 
     return gw, mock_ollama, mock_mcp, tmp_path
