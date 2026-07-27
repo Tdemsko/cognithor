@@ -62,6 +62,18 @@ This profile is for one operator in a home network:
     chain before execution. If the required audit trail is absent or its write
     fails, the approved action is converted to BLOCK and never reaches the
     executor.
+21. Required pre-execution hooks are an integrity-checked security boundary.
+    A missing runner, incomplete required hook set, or hook exception blocks
+    the tool call before the MCP client is invoked.
+22. The credential store has no plaintext/obfuscation fallback. Missing key
+    material, malformed storage, or failed ciphertext authentication is a
+    hard error and must never be interpreted as an empty store.
+23. Credential injection is deterministic and strict by default. Malformed or
+    unresolved mappings fail closed, and agent/capability-scoped injection
+    cannot silently fall back to a global credential.
+24. Known API credentials and private keys are removed before model input in
+    home-lab mode. Sensitive-key values and recognized secret patterns are
+    redacted from both authoritative and operational audit records.
 
 ## Risk policy
 
@@ -137,6 +149,43 @@ The macOS release host proved fail-closed refusal when no secure isolation
 backend is available. A live Ubuntu bubblewrap/container escape and private
 network-isolation run remains a mandatory deployment gate, as it was for the
 first baseline release.
+
+## Third release-candidate scope
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+The Secret and Runtime Execution Boundary release candidate adds:
+
+- fail-closed runtime behavior for exceptions in required pre-execution
+  security hooks;
+- integrity checks that the required secret-redaction and security-extension
+  hooks are still registered before every tool execution;
+- mandatory encrypted credential storage with explicit integrity and
+  availability errors;
+- strict credential mappings that reject malformed/unresolved references;
+- scoped credential injection that denies implicit global-secret fallback;
+- home-lab model-input stripping for known API keys and private keys, even
+  when optional personal-data redaction is disabled;
+- recursive sensitive-key and secret-pattern redaction in authoritative and
+  operational audit parameters, results, reasons, and errors;
+- security-contract tests covering missing/crashed runtime controls,
+  credential corruption, scope broadening, and nested audit leaks.
+
+All three rounds in `TEST_EVIDENCE.md` passed on 2026-07-26.
+
+- Round 1 final regression: 18,910 passed, 39 skipped, zero failed.
+- Round 2 adversarial/integration/failure testing: 3,971 passed, 7 skipped,
+  zero failed.
+- Round 3 release, installed-wheel, rollback/restore, voice-WebSocket, and
+  final regression gates all passed.
+- Weighted release score: 99.625/100.
+- Unresolved Critical findings: zero.
+- Unresolved High findings: zero.
+
+This release establishes the credential-store and execution-hook foundation.
+It does not yet represent every external connector as migrated to a single
+per-capability secret broker. That integration work remains a follow-up and
+must pass its own three-round acceptance cycle.
 
 ## Accepted evidence for this release candidate
 

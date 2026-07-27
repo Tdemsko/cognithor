@@ -49,7 +49,7 @@ class TestToolHookRunner:
         assert not result.denied
         assert result.updated_input == {"key": "val", "extra": True}
 
-    def test_pre_hook_exception_ignored(self):
+    def test_pre_hook_exception_is_reported_in_compatibility_mode(self):
         runner = ToolHookRunner()
         runner.register(
             HookEvent.PRE_TOOL_USE,
@@ -60,6 +60,20 @@ class TestToolHookRunner:
         result = runner.run_pre_tool_use("tool", {})
         assert not result.denied
         assert any("failed" in m for m in result.messages)
+
+    def test_pre_hook_exception_fails_closed_when_required(self):
+        runner = ToolHookRunner(fail_closed=True)
+        runner.register(
+            HookEvent.PRE_TOOL_USE,
+            "security_control",
+            lambda t, i: (_ for _ in ()).throw(RuntimeError("secret failure")),
+        )
+        result = runner.run_pre_tool_use("tool", {})
+        assert result.denied
+        assert result.deny_reason == (
+            "Required pre-execution security control 'security_control' failed"
+        )
+        assert "secret failure" not in result.deny_reason
 
     def test_post_hook_fires(self):
         calls = []

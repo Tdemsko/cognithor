@@ -108,14 +108,13 @@ class TestMaskDict:
             }
         }
         result = mask_dict(data)
-        assert "sk-abc1***" in result["config"]["api_key"]
+        assert result["config"]["api_key"] == "***REDACTED***"
         assert result["config"]["name"] == "test"
 
     def test_masks_list_values(self):
         data = {"tokens": ["sk-abc123456789012345678901234567", "normal"]}
         result = mask_dict(data)
-        assert "***" in result["tokens"][0]
-        assert result["tokens"][1] == "normal"
+        assert result["tokens"] == ["***REDACTED***", "***REDACTED***"]
 
     def test_depth_limit(self):
         # 12 levels deep should stop at depth 10

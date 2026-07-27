@@ -53,12 +53,13 @@ class HookResult:
 class ToolHookRunner:
     """Fuehrt registrierte Hooks vor/nach Tool-Ausfuehrung aus."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fail_closed: bool = False) -> None:
         self._hooks: dict[HookEvent, list[tuple[str, Callable[..., Any]]]] = {
             HookEvent.PRE_TOOL_USE: [],
             HookEvent.POST_TOOL_USE: [],
             HookEvent.POST_TOOL_USE_FAILURE: [],
         }
+        self._fail_closed = fail_closed
 
     def register(self, event: HookEvent, name: str, hook: Callable[..., Any]) -> None:
         """Registriert einen Hook fuer ein Event."""
@@ -84,8 +85,19 @@ class ToolHookRunner:
                     if output.get("updated_input"):
                         result.updated_input = output["updated_input"]
             except Exception as exc:
-                result.messages.append(f"Hook '{hook_name}' failed: {exc}")
-                log.warning("tool_hook_pre_failed", hook=hook_name, error=str(exc))
+                log.error(
+                    "tool_hook_pre_failed",
+                    hook=hook_name,
+                    error_type=type(exc).__name__,
+                )
+                if self._fail_closed:
+                    result.denied = True
+                    result.deny_reason = (
+                        f"Required pre-execution security control '{hook_name}' failed"
+                    )
+                    result.messages.append(result.deny_reason)
+                    return result
+                result.messages.append(f"Hook '{hook_name}' failed")
         return result
 
     def run_post_tool_use(
@@ -118,6 +130,10 @@ class ToolHookRunner:
     @property
     def hook_count(self) -> int:
         return sum(len(hooks) for hooks in self._hooks.values())
+
+    def registered_names(self, event: HookEvent) -> frozenset[str]:
+        """Return immutable hook names for runtime integrity checks."""
+        return frozenset(name for name, _hook in self._hooks[event])
 
 
 # ============================================================================

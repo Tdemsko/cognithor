@@ -204,9 +204,11 @@ class TestOllamaClientPIIRedactor:
     """Verifies PII redactor plumbs through OllamaClient.chat() + chat_stream()."""
 
     @pytest.mark.asyncio
-    async def test_default_config_no_redaction(self, client: OllamaClient) -> None:
-        """With default config (pii_redactor.enabled=False) the original
-        message must reach the HTTP payload unchanged."""
+    async def test_default_config_leaves_non_secret_pii_unchanged(
+        self, client: OllamaClient
+    ) -> None:
+        """Home-lab defaults protect secrets without silently enabling all
+        optional personal-data categories."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -222,6 +224,26 @@ class TestOllamaClientPIIRedactor:
             )
             sent_payload = mock_http.post.call_args.kwargs["json"]
             assert sent_payload["messages"][0]["content"] == "mail me at alice@foo.com"
+
+    @pytest.mark.asyncio
+    async def test_home_lab_default_redacts_secret_before_model(self, client: OllamaClient) -> None:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "message": {"role": "assistant", "content": "ok"},
+        }
+        raw_key = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        with patch.object(client, "_ensure_client") as mock_ensure:
+            mock_http = AsyncMock()
+            mock_http.post = AsyncMock(return_value=mock_response)
+            mock_ensure.return_value = mock_http
+            await client.chat(
+                model="qwen3:32b",
+                messages=[{"role": "user", "content": f"use token {raw_key}"}],
+            )
+            content = mock_http.post.call_args.kwargs["json"]["messages"][0]["content"]
+            assert raw_key not in content
+            assert "[REDACTED:api_key]" in content
 
     @pytest.mark.asyncio
     async def test_enabled_redacts_before_send(self, config: CognithorConfig) -> None:

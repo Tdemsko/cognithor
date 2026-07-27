@@ -175,7 +175,9 @@ class Executor:
                 security_extension_hook,
             )
 
-            self._tool_hook_runner = ToolHookRunner()
+            self._tool_hook_runner = ToolHookRunner(
+                fail_closed=bool(getattr(config.security, "require_security_controls", False))
+            )
             self._tool_hook_runner.register(
                 _HE.PRE_TOOL_USE, "secret_redacting", secret_redacting_hook
             )
@@ -529,8 +531,33 @@ class Executor:
                     error_type="SecurityBlock",
                 )
 
-        # Pre-Tool-Use Hooks
+        # Pre-Tool-Use Hooks.  In the home-lab profile these hooks are part
+        # of the execution security boundary; absence or runtime failure must
+        # block the action rather than silently bypassing the control.
+        security_controls_required = bool(
+            getattr(self._config.security, "require_security_controls", False)
+        )
         if self._tool_hook_runner:
+            if security_controls_required:
+                from cognithor.core.tool_hooks import HookEvent
+
+                required_pre_hooks = frozenset({"secret_redacting", "security_extension"})
+                registered_pre_hooks = self._tool_hook_runner.registered_names(
+                    HookEvent.PRE_TOOL_USE
+                )
+                if not required_pre_hooks.issubset(registered_pre_hooks):
+                    log.error(
+                        "executor_required_pre_tool_hooks_missing",
+                        missing=sorted(required_pre_hooks - registered_pre_hooks),
+                        tool=tool_name,
+                    )
+                    return ToolResult(
+                        tool_name=tool_name,
+                        content="Required pre-execution security controls are incomplete",
+                        is_error=True,
+                        duration_ms=0,
+                        error_type="SecurityControlFailure",
+                    )
             try:
                 _hr = self._tool_hook_runner.run_pre_tool_use(tool_name, params)
                 if _hr.denied:
@@ -543,8 +570,29 @@ class Executor:
                     )
                 if _hr.updated_input is not None:
                     params = _hr.updated_input
-            except Exception:
-                pass  # Hook-Fehler blockieren nicht
+            except Exception as exc:
+                log.error(
+                    "executor_pre_tool_security_control_failed",
+                    tool=tool_name,
+                    error_type=type(exc).__name__,
+                )
+                if security_controls_required:
+                    return ToolResult(
+                        tool_name=tool_name,
+                        content="Required pre-execution security control failed",
+                        is_error=True,
+                        duration_ms=0,
+                        error_type="SecurityControlFailure",
+                    )
+        elif security_controls_required:
+            log.error("executor_pre_tool_security_controls_missing", tool=tool_name)
+            return ToolResult(
+                tool_name=tool_name,
+                content="Required pre-execution security controls are unavailable",
+                is_error=True,
+                duration_ms=0,
+                error_type="SecurityControlFailure",
+            )
 
         # Tool-Loop-Detection: pruefen ob dieser Call eine Schleife waere
         if self._loop_detector:

@@ -615,3 +615,254 @@ absence of a Linux namespace/container runtime on this macOS validation host.
 The installed wheel proved fail-closed refusal. A real Ubuntu isolation and
 private-network-egress test remains a mandatory deployment gate and is not
 represented as complete.
+
+## Release candidate: Secret and Runtime Execution Boundary
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+### Pre-change focused baseline
+
+Command:
+
+```text
+.venv/bin/python -m pytest \
+  tests/test_core/test_tool_hooks.py \
+  tests/test_core/test_model_router.py \
+  tests/test_security/test_credentials.py \
+  tests/security_contracts/test_inv8_credential_masking.py \
+  tests/test_integration/test_agent_separation.py \
+  -q --tb=short
+```
+
+Result:
+
+```text
+123 passed in 3.27s
+```
+
+The code-level audit then confirmed:
+
+- pre-tool security-hook exceptions were logged and ignored;
+- the Executor also swallowed unexpected pre-hook failures;
+- the credential store treated malformed storage as an empty store and
+  authentication/decryption failure as a missing credential;
+- strict scoped injection did not exist;
+- known-secret model-input redaction was optional;
+- the operational audit did not mask tool results and only sanitized exact
+  top-level credential key names.
+
+### Round 1 — static, unit, security contracts, dependencies/config
+
+Status: **PASS AFTER A REJECTED FULL RUN AND REPAIR**
+
+Static/configuration commands:
+
+```text
+git diff --check
+
+.venv/bin/ruff check <all changed Python files>
+.venv/bin/ruff format --check <all changed Python files>
+
+.venv/bin/python -m mypy --strict \
+  src/cognithor/audit/__init__.py \
+  src/cognithor/core/executor.py \
+  src/cognithor/core/model_router.py \
+  src/cognithor/core/tool_hooks.py \
+  src/cognithor/security/audit.py \
+  src/cognithor/security/credentials.py \
+  tests/security_contracts/test_secret_execution_boundary.py
+
+.venv/bin/python -m pip check
+.venv/bin/python -m pip_audit
+```
+
+Results:
+
+- diff whitespace/error check: pass;
+- Ruff lint: pass;
+- Ruff format: all 14 selected Python files formatted;
+- strict mypy: `Success: no issues found in 7 source files`;
+- dependency consistency: `No broken requirements found`;
+- live dependency audit: `No known vulnerabilities found`.
+
+The first dependency-audit attempt was rejected because the local execution
+sandbox could not resolve PyPI. The exact audit was rerun with approved
+network access and passed.
+
+Focused compatibility/security confirmation after implementation:
+
+```text
+294 passed, 0 failed
+```
+
+The first full regression was rejected:
+
+```text
+18908 passed, 39 skipped, 2 failed, 3547 warnings in 733.84s
+```
+
+Both failures were legacy audit tests:
+
+1. a sensitive `api_key` field expected partial masking rather than full
+   field redaction;
+2. a sensitive `tokens` container expected a non-secret-looking sibling to
+   remain visible.
+
+The security rule was not weakened. Sensitive container shape is now
+preserved for consumers, while every leaf beneath an explicitly sensitive
+field is fully redacted. The stale tests were strengthened. Targeted audit
+and security-contract repair confirmation:
+
+```text
+61 passed, 0 failed
+```
+
+The clean full Round 1 rerun passed:
+
+```text
+18910 passed, 39 skipped, 3547 warnings in 740.67s (0:12:20)
+```
+
+### Round 2 — integration, adversarial, bypass, failure injection
+
+Status: **PASS**
+
+Commands:
+
+```text
+.venv/bin/python -m pytest \
+  tests/security_contracts tests/adversarial tests/test_security \
+  tests/test_gateway/test_pge_loop_deep.py \
+  -q --tb=short
+
+.venv/bin/python -m pytest \
+  tests/test_integration tests/integration tests/test_e2e_scenarios.py \
+  -q --tb=short
+
+.venv/bin/python -m pytest \
+  tests/chaos \
+  tests/test_core/test_worker.py \
+  tests/test_core/test_distributed_lock.py \
+  tests/test_core/test_distributed_lock_coverage.py \
+  tests/test_crew/test_idempotent_kickoff.py \
+  tests/test_cron/test_engine.py \
+  tests/test_core/test_workflow.py \
+  tests/test_core/test_executor.py \
+  tests/test_core/test_executor_coverage.py \
+  tests/test_core/test_llm_retry.py \
+  tests/test_db/test_sqlite_retry.py \
+  -q --tb=short
+```
+
+Results:
+
+- security/adversarial/bypass: `2237 passed, 5 skipped`;
+- integration/E2E: `1421 passed, 2 skipped`;
+- failure/retry/idempotency: `313 passed`;
+- aggregate: `3971 passed, 7 skipped, 0 failed`.
+
+The new adversarial contracts prove that:
+
+- deleting or crashing required pre-execution controls cannot reach the tool
+  client;
+- malformed/unresolved mappings cannot preserve a model-supplied credential
+  value;
+- scoped injection cannot silently consume a global credential;
+- corrupted encrypted storage never becomes an apparently empty store;
+- nested sensitive-key values and tool results cannot survive audit
+  serialization.
+
+### Round 3 — isolated RC, sandbox isolation, rollback, regression
+
+Status: **PASS**
+
+Release, rollback/restore, and voice suites:
+
+```text
+.venv/bin/python -m pytest tests/release -q --tb=short
+4 passed
+
+.venv/bin/python -m pytest \
+  tests/test_governance/test_policy_patcher.py \
+  tests/test_governance/test_policy_patcher_ext.py \
+  tests/test_packs/test_installer.py \
+  tests/test_system/test_hardware_aware_runtime.py \
+  tests/test_core/test_checkpoint.py \
+  tests/test_integration/test_v18_graph_orchestrator.py \
+  tests/security_contracts/test_inv5_audit_chain_integrity.py \
+  tests/test_evolution_orchestrator.py \
+  -q --tb=short
+214 passed
+
+.venv/bin/python -m pytest \
+  tests/test_channels/test_voice_ws_bridge.py -q --tb=short
+16 passed
+```
+
+An isolated wheel was built and installed outside the source tree:
+
+```text
+Successfully built cognithor-0.99.0-py3-none-any.whl
+Successfully installed cognithor-0.99.0
+```
+
+The first install command used a repository-relative `.venv/bin/python` while
+its working directory was `/private/tmp`; it stopped before installation with
+`no such file or directory`. The corrected command used the exact absolute
+interpreter path. No product code or test assertion was changed.
+
+The installed-wheel probe asserted that `cognithor.__file__` resolved from the
+disposable `wheel-target` and returned:
+
+```text
+installed_import=PASS
+credential_integrity=PASS
+credential_scope=PASS
+audit_redaction=PASS
+model_secret_redaction=PASS
+runtime_hook_fail_closed=PASS
+sandbox_fail_closed=PASS
+```
+
+The sandbox probe attempted to create a marker file. The macOS validation host
+had no bubblewrap, Firejail, or Windows Job Object, so execution failed closed
+and the marker was not created.
+
+Final independent regression:
+
+```text
+18910 passed, 39 skipped, 3547 warnings in 728.13s (0:12:08)
+```
+
+The three full runs in this candidate's history rewrote upstream sample-skill
+fixtures and created six MagicMock-named SQLite artifacts (two per run). Each
+artifact was positively identified as test-generated, restored/removed, and
+excluded from the release diff before final validation.
+
+### Acceptance score
+
+All hard gates passed. Zero unresolved Critical or High findings.
+
+| Dimension | Weight | Result | Weighted |
+|---|---:|---:|---:|
+| Secret boundary and required runtime-control correctness | 40 | 100.0 | 40.000 |
+| Regression and compatibility | 20 | 100.0 | 20.000 |
+| Adversarial, bypass, integration, failure behavior | 20 | 100.0 | 20.000 |
+| Packaging, isolation, rollback, recovery | 15 | 97.5 | 14.625 |
+| Evidence, maintainability, upstream discipline | 5 | 100.0 | 5.000 |
+| **Total** | **100** |  | **99.625 / 100** |
+
+Reported release score: **99.625/100 — PASS**
+
+The packaging/isolation deduction reflects the absence of a live Linux
+namespace/container runtime on the macOS validation host. The installed wheel
+proved fail-closed refusal. A real Ubuntu isolation and private-network-egress
+test remains a mandatory deployment gate and is not represented as complete.
+
+Residual Medium work, outside this accepted patch set:
+
+- migrate every external connector to the deterministic per-capability secret
+  broker rather than a mix of environment/keyring lookup paths;
+- make durable project-scoped retrieval provenance authoritative and
+  fail-closed for untrusted memory promotion;
+- prove network-denying sandbox behavior on the target disposable Ubuntu VM.

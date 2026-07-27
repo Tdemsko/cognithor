@@ -21,6 +21,7 @@ import pytest
 
 from cognithor.config import CognithorConfig
 from cognithor.core.executor import Executor
+from cognithor.core.tool_hooks import HookEvent, ToolHookRunner
 from cognithor.models import (
     GateDecision,
     GateStatus,
@@ -120,6 +121,50 @@ class TestBasicExecution:
         results = await executor.execute([action], [decision])
         assert results[0].success
         mock_mcp.call_tool.assert_called_once()
+
+
+class TestRequiredPreExecutionControls:
+    @pytest.mark.asyncio
+    async def test_missing_hook_runner_blocks_tool(
+        self, executor: Executor, mock_mcp: AsyncMock
+    ) -> None:
+        executor._tool_hook_runner = None
+
+        result = await executor._execute_single("read_file", {"path": "/test"})
+
+        assert result.is_error
+        assert result.error_type == "SecurityControlFailure"
+        mock_mcp.call_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_crashed_required_hook_blocks_tool(
+        self, executor: Executor, mock_mcp: AsyncMock
+    ) -> None:
+        assert executor._tool_hook_runner is not None
+        executor._tool_hook_runner.register(
+            HookEvent.PRE_TOOL_USE,
+            "crashed_required_control",
+            lambda _tool, _params: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        result = await executor._execute_single("read_file", {"path": "/test"})
+
+        assert result.is_error
+        assert result.error_type == "HookDenied"
+        assert "crashed_required_control" in result.content
+        mock_mcp.call_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_incomplete_required_hook_set_blocks_tool(
+        self, executor: Executor, mock_mcp: AsyncMock
+    ) -> None:
+        executor._tool_hook_runner = ToolHookRunner(fail_closed=True)
+
+        result = await executor._execute_single("read_file", {"path": "/test"})
+
+        assert result.is_error
+        assert result.error_type == "SecurityControlFailure"
+        mock_mcp.call_tool.assert_not_called()
 
 
 # ============================================================================

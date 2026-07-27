@@ -356,8 +356,11 @@ class AuditLogger:
         session_id: str = "",
     ) -> AuditEntry:
         """Logs a tool call."""
-        # Parameter sanitizing (do not log credentials)
+        from cognithor.security.audit import mask_credentials
+
+        # Parameter and result sanitizing (do not log credentials)
         safe_params = self._sanitize_params(parameters or {})
+        safe_result = mask_credentials(result[:500])
 
         return self._log(
             category=AuditCategory.TOOL_CALL,
@@ -367,7 +370,7 @@ class AuditLogger:
             tool_name=tool_name,
             description=f"Tool '{tool_name}' called",
             parameters=safe_params,
-            result=result[:500],  # Truncate result
+            result=safe_result,
             success=success,
             duration_ms=duration_ms,
             session_id=session_id,
@@ -1392,23 +1395,12 @@ class AuditLogger:
     @staticmethod
     def _sanitize_params(params: dict[str, Any]) -> dict[str, Any]:
         """Removes credentials from parameters."""
-        sensitive_keys = {
-            "password",
-            "token",
-            "api_key",
-            "secret",
-            "authorization",
-            "credential",
-            "private_key",
-        }
-        sanitized = {}
-        for key, value in params.items():
-            if key.lower() in sensitive_keys:
-                sanitized[key] = "***REDACTED***"
-            elif isinstance(value, str) and len(value) > 1000:
+        from cognithor.security.audit import mask_dict
+
+        sanitized = mask_dict(params)
+        for key, value in sanitized.items():
+            if isinstance(value, str) and len(value) > 1000:
                 sanitized[key] = value[:100] + f"...[{len(value)} chars]"
-            else:
-                sanitized[key] = value
         return sanitized
 
     @staticmethod
