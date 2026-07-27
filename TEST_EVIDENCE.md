@@ -866,3 +866,209 @@ Residual Medium work, outside this accepted patch set:
 - make durable project-scoped retrieval provenance authoritative and
   fail-closed for untrusted memory promotion;
 - prove network-denying sandbox behavior on the target disposable Ubuntu VM.
+
+## Release candidate: Project Memory, Provenance, and Untrusted Evidence
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+### Pre-round audit and focused confirmation
+
+The fresh code-level gap audit found that project identity was not
+authoritative across all memory paths, legacy rows could bleed across named
+projects, retrieved evidence reached model prompts without a deterministic
+authority boundary, reflection could silently promote model conclusions, and
+public knowledge ingestion relied on an HTTP client without redirect-aware
+private-network enforcement.
+
+After implementation, focused project/provenance/index/search confirmation
+passed `94/94`; skills/baseline/phase confirmation passed `129/129`; the broad
+gateway/learning/MCP/skills/security selection passed `1,726/1,726`.
+
+### Round 1 — static, unit, security contracts, dependencies/config
+
+Status: **PASS AFTER REJECTED RUNS AND REPAIR**
+
+Static/configuration gates:
+
+```text
+git diff --check
+.venv/bin/ruff check <all changed Python files>
+.venv/bin/ruff format --check <all changed Python files>
+.venv/bin/python -m mypy --strict <30 changed source files>
+.venv/bin/python -m pip check
+.venv/bin/python -m pip_audit
+```
+
+Results:
+
+- diff whitespace/error check: pass;
+- Ruff lint: pass;
+- Ruff formatting: all 40 selected Python files formatted;
+- strict mypy: success on 30 source files;
+- dependency consistency: `No broken requirements found`;
+- live dependency audit: `No known vulnerabilities found`.
+
+The first formatting gate rejected four files. They were mechanically
+formatted and the complete static gate was restarted. The first dependency
+audit could not resolve PyPI inside the restricted runner; the exact audit was
+rerun with approved network access and passed.
+
+The first full regression was rejected:
+
+```text
+1 failed, 18978 passed, 39 skipped
+```
+
+The failure exposed a real audit-completeness defect: project-scoped
+reflection evidence could be indexed without an authoritative event that
+identified session, project, tier, source, trust, authority, and chunk count.
+The implementation was repaired to emit `project_reflection_evidence_indexed`
+and review-only procedure-proposal events. A legacy optimizer test was also
+made explicit that it exercises non-home-lab mode; the home-lab security rule
+was not weakened.
+
+The eligible clean full regression passed:
+
+```text
+18979 passed, 39 skipped, 3547 warnings in 734.86s (0:12:14)
+```
+
+### Round 2 — integration, adversarial, bypass, failure injection
+
+Status: **PASS**
+
+Security/adversarial/permission-bypass selection:
+
+```text
+2257 passed, 5 skipped, 2 warnings in 31.85s
+```
+
+Integration/E2E selection:
+
+```text
+1421 passed, 2 skipped, 1 warning in 41.14s
+```
+
+Chaos, worker retry, locking, workflow, and idempotency selection:
+
+```text
+313 passed in 29.00s
+```
+
+Round 2 aggregate:
+
+```text
+3991 passed, 7 skipped, 0 failed
+```
+
+The adversarial contracts cover forged/missing/tampered provenance, project
+scope omission, legacy-memory bleed, delimiter breakout, prompt-injection
+authority claims, silent durable-memory promotion, post-message project
+switching, skill reload bypass, redirect/private-address SSRF, DNS answers
+containing any private address, metadata endpoints, oversized bodies, and
+credential/query leakage in network logs.
+
+### Round 3 — installed RC, system isolation, recovery, regression
+
+Status: **PASS**
+
+Release suite:
+
+```text
+.venv/bin/python -m pytest tests/release -q --tb=short
+4 passed in 1.13s
+```
+
+An isolated wheel was built and installed outside the source checkout:
+
+```text
+Successfully built cognithor-0.99.0-py3-none-any.whl
+Successfully installed cognithor-0.99.0
+```
+
+The first no-dependencies disposable-venv import stopped on missing PyYAML.
+The corrected probe retained the isolated installed wheel while using the
+already-audited dependency environment and forced the installed package ahead
+of the source tree. No product code changed.
+
+Installed-artifact results:
+
+```text
+installed_import=PASS
+memory_integrity=PASS
+private_egress_guard=PASS
+sandbox_fail_closed=PASS
+```
+
+The sandbox probe attempted to create a marker file. The macOS runner had no
+secure namespace backend; execution refused and the marker remained absent.
+
+Rollback/system suite:
+
+```text
+214 passed in 1.16s
+```
+
+Separately isolated voice-WebSocket suite:
+
+```text
+16 passed in 0.14s
+```
+
+A temporary project-memory backup/restore probe copied the persistent
+database, restored it into a clean location, re-opened the restored index, and
+proved both content integrity and project isolation:
+
+```text
+project_memory_backup=PASS
+project_memory_restore=PASS
+project_scope_after_restore=PASS
+```
+
+The first attempt to run the entire upstream regression from a disposable
+copy was rejected as a harness error: editable-install resolution selected the
+original source tree and the restricted macOS runner denied five unrelated
+environment operations (loopback sockets, PyPI DNS, and home-directory
+writes). A second copied-source attempt correctly forced the candidate source
+path but the upstream PGE coverage test caused a native Torch import abort
+inside SentenceTransformers after roughly 80 percent of the selection had
+passed. That native runtime abort was retained as ineligible evidence; the
+environment-dependent PGE coverage file had already passed in Round 1 and its
+security-relevant behavior in Round 2.
+
+The final copied-source, import-isolated release regression excluded only that
+environment-dependent upstream file and passed:
+
+```text
+1576 passed in 10.85s
+```
+
+Round 3 non-overlapping pytest aggregate:
+
+```text
+1810 passed, 0 failed
+```
+
+All installed-artifact and recovery probes also passed.
+
+### Acceptance score
+
+All candidate hard gates passed. Zero unresolved Critical or High findings in
+the accepted candidate scope.
+
+| Dimension | Weight | Result | Weighted |
+|---|---:|---:|---:|
+| Project scope, provenance, and untrusted-evidence controls | 40 | 100.0 | 40.000 |
+| Regression and compatibility | 20 | 100.0 | 20.000 |
+| Adversarial, bypass, integration, failure behavior | 20 | 100.0 | 20.000 |
+| Packaging, isolation, rollback, recovery | 15 | 97.5 | 14.625 |
+| Evidence, maintainability, upstream discipline | 5 | 100.0 | 5.000 |
+| **Total** | **100** |  | **99.625 / 100** |
+
+Reported release score: **99.625/100 — PASS**
+
+The packaging/isolation deduction reflects the absence of a live Linux
+namespace/container runtime on the macOS validation host. Deployment still
+requires an Ubuntu worker/container escape and VM-firewall private-egress
+test. Generic MCP web/browser redirect enforcement is deliberately outside
+this candidate and remains a separate three-round release gate.

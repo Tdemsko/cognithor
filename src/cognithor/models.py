@@ -21,7 +21,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 # ============================================================================
 # Hilfsfunktionen
@@ -427,6 +427,7 @@ class SessionContext(BaseModel):
     user_id: str = "default"
     channel: str = "cli"
     agent_name: str = "jarvis"  # Zugeordneter Agent
+    project_id: str = "default"  # Deterministic durable-memory/workspace boundary
     started_at: datetime = Field(default_factory=_utc_now)
     last_activity: datetime = Field(default_factory=_utc_now)
     message_count: int = 0
@@ -445,6 +446,13 @@ class SessionContext(BaseModel):
     _blocked_tools: dict[str, int] = PrivateAttr(default_factory=dict)  # Tool → Block-Counter
 
     model_config = {"arbitrary_types_allowed": True}
+
+    @field_validator("project_id")
+    @classmethod
+    def _validate_project_id(cls, value: str) -> str:
+        from cognithor.memory.trust import validate_project_id
+
+        return validate_project_id(value)
 
     def __init__(self, **data: Any) -> None:
         """Initialisiert die SessionContext mit User- und System-Nachrichten."""
@@ -491,6 +499,49 @@ class Chunk(BaseModel, frozen=True):
     entities: list[str] = Field(default_factory=list)
     timestamp: datetime | None = None
     token_count: int = 0
+    project_id: str = "default"
+    source_type: str = "legacy"
+    source_id: str = ""
+    source_trust: str = "legacy_unscoped"
+    instruction_authority: bool = False
+    provenance_hash: str = ""
+
+    @field_validator("project_id")
+    @classmethod
+    def _validate_project_id(cls, value: str) -> str:
+        from cognithor.memory.trust import validate_project_id
+
+        return validate_project_id(value)
+
+    @field_validator("instruction_authority")
+    @classmethod
+    def _reject_instruction_authority(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("Durable memory chunks cannot carry instruction authority")
+        return False
+
+    @field_validator("source_type")
+    @classmethod
+    def _validate_source_type(cls, value: str) -> str:
+        from cognithor.memory.trust import validate_source_type
+
+        return validate_source_type(value)
+
+    @field_validator("source_trust")
+    @classmethod
+    def _validate_source_trust(cls, value: str) -> str:
+        from cognithor.memory.trust import SourceTrust
+
+        return SourceTrust(value).value
+
+    @field_validator("provenance_hash")
+    @classmethod
+    def _validate_provenance_hash(cls, value: str) -> str:
+        if value and (
+            len(value) != 64 or any(char not in "0123456789abcdef" for char in value.lower())
+        ):
+            raise ValueError("provenance_hash must be an empty value or 64 hexadecimal characters")
+        return value.lower()
 
 
 class Entity(BaseModel):
@@ -504,6 +555,16 @@ class Entity(BaseModel):
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    project_id: str = ""
+
+    @field_validator("project_id")
+    @classmethod
+    def _validate_optional_project_id(cls, value: str) -> str:
+        if not value:
+            return ""
+        from cognithor.memory.trust import validate_project_id
+
+        return validate_project_id(value)
 
 
 class Relation(BaseModel):
@@ -517,6 +578,16 @@ class Relation(BaseModel):
     source_file: str = ""
     created_at: datetime = Field(default_factory=_utc_now)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    project_id: str = ""
+
+    @field_validator("project_id")
+    @classmethod
+    def _validate_optional_project_id(cls, value: str) -> str:
+        if not value:
+            return ""
+        from cognithor.memory.trust import validate_project_id
+
+        return validate_project_id(value)
 
 
 class ProcedureMetadata(BaseModel):

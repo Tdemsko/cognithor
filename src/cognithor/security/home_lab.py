@@ -124,6 +124,7 @@ DURABLE_MEMORY_WRITE_TOOLS = frozenset(
         "add_relation",
         "identity_dream",
         "knowledge_synthesize",
+        "record_procedure_usage",
         "save_to_memory",
         "vault_link",
         "vault_save",

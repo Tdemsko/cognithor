@@ -17,6 +17,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from cognithor.memory.trust import (
+    DEFAULT_PROJECT_ID,
+    SourceTrust,
+    render_untrusted_context,
+    resolve_project_id,
+)
 from cognithor.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -116,6 +122,7 @@ class ContextPipeline:
         *,
         user_id: str = "",
         channel_kind: str | None = None,
+        project_id: str | None = None,
     ) -> ContextResult:
         """Collect relevant context and inject it into WorkingMemory.
 
@@ -141,6 +148,8 @@ class ContextPipeline:
             return ContextResult(skipped=True, skip_reason="disabled")
 
         t0 = time.perf_counter()
+        project = resolve_project_id(project_id)
+        wm.session_state["project_id"] = project
 
         # Sprint-24: PSE Auto-Switch — runs *before* the smalltalk
         # short-circuit so latency-tight smalltalk responses still get
@@ -168,9 +177,9 @@ class ContextPipeline:
         w1_start = time.perf_counter()
         _loop = asyncio.get_running_loop()
 
-        memory_task = self._search_memory_async(user_message)
-        vault_task = self._search_vault(user_message)
-        episode_task = _loop.run_in_executor(None, self._get_episodes)
+        memory_task = self._search_memory_async(user_message, project_id=project)
+        vault_task = self._search_vault(user_message, project_id=project)
+        episode_task = _loop.run_in_executor(None, self._get_episodes, project)
         skill_task = _loop.run_in_executor(None, self._get_skill_context, user_message)
         pref_task = _loop.run_in_executor(None, self._get_user_pref_hint, user_id)
 
@@ -222,7 +231,11 @@ class ContextPipeline:
             wm.injected_memories = list(memory_results)
 
         # Vault + episodes -> wm.injected_procedures (max 1 slot)
-        supplementary = self._format_supplementary_context(vault_snippets, episode_snippets)
+        supplementary = self._format_supplementary_context(
+            vault_snippets,
+            episode_snippets,
+            project_id=project,
+        )
         if supplementary and len(wm.injected_procedures) < 2:
             # Truncate budget
             if len(supplementary) > self._config.max_context_chars:
@@ -230,17 +243,32 @@ class ContextPipeline:
             wm.injected_procedures.insert(0, supplementary)
 
         # ── Correction Reminders (Smart Recovery) ────────────────
-        if hasattr(self, "_correction_memory") and self._correction_memory:
+        if (
+            project == DEFAULT_PROJECT_ID
+            and hasattr(self, "_correction_memory")
+            and self._correction_memory
+        ):
             try:
                 reminder = self._correction_memory.get_reminder(user_message)
                 if reminder and len(wm.injected_procedures) < 3:
-                    wm.injected_procedures.append(reminder)
+                    wm.injected_procedures.append(
+                        render_untrusted_context(
+                            reminder,
+                            project_id=project,
+                            source_type="correction_memory",
+                            source_id="correction-memory://reminder",
+                        )
+                    )
                     log.debug("correction_reminder_injected", length=len(reminder))
             except Exception:
                 log.debug("correction_reminder_failed", exc_info=True)
 
         # Wave 3: Tactical Memory insights
-        tactical = getattr(self._memory_manager, "tactical", None)
+        tactical = (
+            getattr(self._memory_manager, "tactical", None)
+            if project == DEFAULT_PROJECT_ID
+            else None
+        )
         if tactical is not None:
             try:
                 _budget = 400
@@ -249,7 +277,12 @@ class ContextPipeline:
                     _budget = _tcfg.budget_tokens
                 tactical_text = tactical.get_insights_for_llm(user_message, max_chars=_budget)
                 if tactical_text:
-                    wm.injected_tactical = tactical_text
+                    wm.injected_tactical = render_untrusted_context(
+                        tactical_text,
+                        project_id=project,
+                        source_type="tactical_memory",
+                        source_id="tactical-memory://insights",
+                    )
             except Exception:
                 log.debug("context_pipeline_tactical_failed", exc_info=True)
 
@@ -357,7 +390,12 @@ class ContextPipeline:
             return True
         return normalized in self._config.smalltalk_patterns
 
-    async def _search_memory_async(self, query: str) -> list[MemorySearchResult]:
+    async def _search_memory_async(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[MemorySearchResult]:
         """Full hybrid search (BM25 + Vector + Graph) via MemoryManager."""
         if not self._memory_manager:
             return []
@@ -367,19 +405,26 @@ class ContextPipeline:
                     query=query,
                     top_k=self._config.memory_top_k,
                     enhanced=True,
+                    project_id=project_id,
                 )
                 return results
             # Fallback: sync BM25-only (legacy)
             sync_results: list[MemorySearchResult] = self._memory_manager.search_memory_sync(
                 query=query,
                 top_k=self._config.memory_top_k,
+                project_id=project_id,
             )
             return sync_results
         except Exception:
             log.debug("context_memory_search_failed", exc_info=True)
             return []
 
-    def _search_memory(self, query: str) -> list[MemorySearchResult]:
+    def _search_memory(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[MemorySearchResult]:
         """BM25-only search — sync fallback, kept for backward compatibility."""
         if not self._memory_manager:
             return []
@@ -387,14 +432,24 @@ class ContextPipeline:
             results: list[MemorySearchResult] = self._memory_manager.search_memory_sync(
                 query=query,
                 top_k=self._config.memory_top_k,
+                project_id=project_id,
             )
             return results
         except Exception:
             log.debug("context_memory_search_failed", exc_info=True)
             return []
 
-    async def _search_vault(self, query: str) -> list[str]:
+    async def _search_vault(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[str]:
         """Vault full-text search -- async, ~10-50ms."""
+        if resolve_project_id(project_id) != DEFAULT_PROJECT_ID:
+            # Legacy VaultTools has no project-aware contract.  Skipping it is
+            # fail-closed and prevents cross-project retrieval.
+            return []
         if not self._vault_tools:
             return []
         try:
@@ -410,8 +465,12 @@ class ContextPipeline:
             log.debug("context_vault_search_failed", exc_info=True)
             return []
 
-    def _get_episodes(self) -> list[str]:
+    def _get_episodes(self, project_id: str | None = None) -> list[str]:
         """Recent episodes -- sync, ~1-5ms."""
+        if resolve_project_id(project_id) != DEFAULT_PROJECT_ID:
+            # EpisodicMemory is path-global today.  Do not inject it into a
+            # named project until that provider exposes project scoping.
+            return []
         if not self._memory_manager:
             return []
         try:
@@ -503,6 +562,8 @@ class ContextPipeline:
         self,
         vault_snippets: list[str],
         episode_snippets: list[str],
+        *,
+        project_id: str | None = None,
     ) -> str:
         """Format vault+episodes as a compact context string."""
         parts: list[str] = []
@@ -510,4 +571,14 @@ class ContextPipeline:
             parts.append("**Vault-Notizen:**\n" + "\n".join(vault_snippets[:3]))
         if episode_snippets:
             parts.append("**Letzte Aktivit\u00e4ten:**\n" + "\n".join(episode_snippets[:3]))
-        return "\n\n".join(parts)
+        raw = "\n\n".join(parts)
+        if not raw:
+            return ""
+        return render_untrusted_context(
+            raw,
+            project_id=project_id,
+            source_type="legacy_retrieval",
+            source_id="legacy-retrieval://vault-episodes",
+            source_trust=SourceTrust.LEGACY_UNSCOPED,
+            max_chars=self._config.max_context_chars,
+        )

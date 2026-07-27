@@ -39,8 +39,46 @@ from cognithor.models import (
     SessionContext,
 )
 from cognithor.security.audit import AuditTrail, _compute_hash
+from cognithor.skills.registry import SkillRegistry
 
 pytestmark = pytest.mark.security_contract
+
+
+def _skill_markdown(name: str) -> str:
+    return (
+        "---\n"
+        f"name: {name}\n"
+        f"trigger_keywords: [{name.lower()}]\n"
+        "tools_required: []\n"
+        "---\n"
+        f"{name} instructions\n"
+    )
+
+
+def test_restricted_skill_registry_never_loads_community_or_generated_instructions(
+    tmp_path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    community_dir = skills_dir / "community" / "downloaded"
+    generated_dir = skills_dir / "generated"
+    community_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    (skills_dir / "operator.md").write_text(_skill_markdown("Operator"), encoding="utf-8")
+    (community_dir / "skill.md").write_text(_skill_markdown("Downloaded"), encoding="utf-8")
+    (generated_dir / "agent.md").write_text(_skill_markdown("Agent"), encoding="utf-8")
+
+    registry = SkillRegistry(
+        allow_community_skills=False,
+        allow_generated_skills=False,
+    )
+    registry.load_from_directories([skills_dir])
+    # Reload is the important regression case: component/config reloads must
+    # preserve the construction-time trust boundary.
+    registry.load_from_directories([skills_dir])
+
+    loaded_names = {skill.name for skill in registry.list_all()}
+    assert loaded_names == {"Operator"}
+    assert registry.get_generated_skills() == []
 
 
 def _gatekeeper(tmp_path) -> tuple[Gatekeeper, CognithorConfig]:
@@ -146,6 +184,7 @@ def test_model_rationale_and_risk_estimate_cannot_downgrade_host_execution(tmp_p
     [
         "save_to_memory",
         "add_entity",
+        "record_procedure_usage",
         "vault_write",
         "knowledge_synthesize",
     ],

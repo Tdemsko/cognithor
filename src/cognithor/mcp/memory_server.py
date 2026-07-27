@@ -22,11 +22,19 @@ Bibel-Referenz: §5.3 (jarvis-memory Server)
 
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from cognithor.i18n import t
+from cognithor.memory.trust import (
+    DEFAULT_PROJECT_ID,
+    SourceTrust,
+    get_active_project_id,
+    render_untrusted_context,
+    render_untrusted_memory,
+)
 from cognithor.models import Entity, MemorySearchResult, MemoryTier, Relation
 from cognithor.utils.logging import get_logger
 
@@ -125,7 +133,7 @@ class MemoryTools:
                 f"Tier: {tier_label} · "
                 f"Quelle: `{chunk.source_path}`{ts}"
             )
-            lines.append(chunk.text.strip())
+            lines.append(render_untrusted_memory(chunk, max_chars=2000))
             lines.append("")
 
         return "\n".join(lines)
@@ -179,8 +187,22 @@ class MemoryTools:
             Bestaetigungsnachricht.
         """
         topic = topic or "Notiz"
-        self._memory.episodic.append_entry(topic=topic, content=content)
         today = date.today().isoformat()
+        project = get_active_project_id()
+        if project == DEFAULT_PROJECT_ID:
+            self._memory.episodic.append_entry(topic=topic, content=content)
+        else:
+            digest = hashlib.sha256(f"{topic}\0{content}".encode()).hexdigest()[:16]
+            source_path = f"projects/{project}/episodes/{today}/{digest}.md"
+            self._memory.index_text(
+                f"# {topic}\n\n{content}",
+                source_path,
+                MemoryTier.EPISODIC,
+                project_id=project,
+                source_type="agent_memory",
+                source_id=f"agent-memory://{project}/episodic/{today}/{digest}",
+                source_trust=SourceTrust.AGENT_INFERENCE,
+            )
         return t("memory.episodic_saved", date=today, topic=topic)
 
     def _save_semantic(self, content: str, source_path: str) -> str:
@@ -196,7 +218,16 @@ class MemoryTools:
         if not source_path:
             source_path = f"knowledge/auto/{date.today().isoformat()}.md"
 
-        count = self._memory.index_text(content, source_path, MemoryTier.SEMANTIC)
+        project = get_active_project_id()
+        count = self._memory.index_text(
+            content,
+            source_path,
+            MemoryTier.SEMANTIC,
+            project_id=project,
+            source_type="agent_memory",
+            source_id=f"agent-memory://{project}/semantic/{source_path}",
+            source_trust=SourceTrust.AGENT_INFERENCE,
+        )
         return t("memory.semantic_saved", count=count, source_path=source_path)
 
     def _save_procedural(self, content: str, source_path: str) -> str:
@@ -216,6 +247,7 @@ class MemoryTools:
         if not source_path.endswith(".md"):
             source_path += ".md"
 
+        project = get_active_project_id()
         proc_dir = self._memory.procedural._dir
         target = (proc_dir / source_path).resolve()
         # Path-Traversal-Schutz: target muss innerhalb proc_dir bleiben
@@ -223,11 +255,25 @@ class MemoryTools:
             target.relative_to(proc_dir.resolve())
         except ValueError:
             return t("memory.access_denied", path=source_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
 
-        # Auch indexieren
-        count = self._memory.index_text(content, str(target), MemoryTier.PROCEDURAL)
+        if project == DEFAULT_PROJECT_ID:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            indexed_path = str(target)
+        else:
+            # Named projects never write into the shared legacy procedure
+            # filesystem.  The project-scoped index is the durable boundary.
+            indexed_path = f"projects/{project}/procedures/{source_path}"
+
+        count = self._memory.index_text(
+            content,
+            indexed_path,
+            MemoryTier.PROCEDURAL,
+            project_id=project,
+            source_type="agent_memory",
+            source_id=f"agent-memory://{project}/procedural/{source_path}",
+            source_trust=SourceTrust.AGENT_INFERENCE,
+        )
         return t("memory.procedural_saved", source_path=source_path, count=count)
 
     # ── Entity/Relation (Wissens-Graph) ──────────────────────────
@@ -250,10 +296,12 @@ class MemoryTools:
         if not entities:
             return t("memory.entity_not_found", name=name)
 
-        lines: list[str] = []
+        rendered_entities: list[str] = []
         for entity in entities[:5]:  # Max 5 Treffer
-            lines.append(f"### {entity.name}")
-            lines.append(t("memory.entity_type_label", value=entity.type))
+            entity_lines = [
+                f"### {entity.name}",
+                t("memory.entity_type_label", value=entity.type),
+            ]
 
             if entity.attributes:
                 attrs = entity.attributes
@@ -263,12 +311,12 @@ class MemoryTools:
                     except json.JSONDecodeError:
                         attrs = {}
                 for k, v in attrs.items():
-                    lines.append(f"- **{k}:** {v}")
+                    entity_lines.append(f"- **{k}:** {v}")
 
             # Relationen laden
             relations = self._memory.index.get_relations_for_entity(entity.id)
             if relations:
-                lines.append(t("memory.entity_relations_label"))
+                entity_lines.append(t("memory.entity_relations_label"))
                 for rel in relations:
                     if rel.source_entity == entity.id:
                         other_id = rel.target_entity
@@ -278,11 +326,19 @@ class MemoryTools:
                         arrow = "←"
                     other = self._memory.index.get_entity_by_id(other_id)
                     other_name = other.name if other else other_id
-                    lines.append(f"- {rel.relation_type} {arrow} {other_name}")
+                    entity_lines.append(f"- {rel.relation_type} {arrow} {other_name}")
 
-            lines.append("")
+            rendered_entities.append(
+                render_untrusted_context(
+                    "\n".join(entity_lines),
+                    project_id=entity.project_id,
+                    source_type="knowledge_graph",
+                    source_id=f"entity://{entity.id}",
+                    source_trust=SourceTrust.AGENT_INFERENCE,
+                )
+            )
 
-        return "\n".join(lines)
+        return "\n\n".join(rendered_entities)
 
     def add_entity(
         self,
@@ -432,16 +488,12 @@ class MemoryTools:
         source_id = sources[0].id
         target_id = targets[0].id
 
-        # Delete matching relations from the database
         try:
-            conn = self._memory.index.conn
-            cursor = conn.execute(
-                "DELETE FROM relations"
-                " WHERE source_entity = ? AND relation_type = ? AND target_entity = ?",
-                (source_id, relation_type, target_id),
+            count = self._memory.index.delete_relation(
+                source_id,
+                relation_type,
+                target_id,
             )
-            conn.commit()
-            count = cursor.rowcount
         except Exception as e:
             return t("memory.delete_failed", error=e)
 
@@ -491,6 +543,18 @@ class MemoryTools:
             Formatierte Tageslog-Eintraege.
         """
         days = max(1, min(30, days))
+        project = get_active_project_id()
+
+        if project != DEFAULT_PROJECT_ID:
+            chunks = self._memory.index.list_chunks(
+                tier=MemoryTier.EPISODIC,
+                project_id=project,
+                since=datetime.now() - timedelta(days=days),
+                limit=100,
+            )
+            if not chunks:
+                return t("memory.no_episodes", days=days)
+            return "\n\n".join(render_untrusted_memory(chunk, max_chars=2000) for chunk in chunks)
 
         recent = self._memory.episodic.get_recent(days=days)
 
@@ -500,7 +564,15 @@ class MemoryTools:
         lines: list[str] = []
         for d, content in recent:
             lines.append(f"## {d.isoformat()}")
-            lines.append(content.strip())
+            lines.append(
+                render_untrusted_context(
+                    content.strip(),
+                    project_id=project,
+                    source_type="legacy_episode",
+                    source_id=f"episodes://{d.isoformat()}",
+                    source_trust=SourceTrust.LEGACY_UNSCOPED,
+                )
+            )
             lines.append("")
 
         return "\n".join(lines)
@@ -522,6 +594,25 @@ class MemoryTools:
 
         keywords = query.strip().split()
         top_k = max(1, min(10, top_k))
+        project = get_active_project_id()
+        if project != DEFAULT_PROJECT_ID:
+            scoped_results = [
+                result
+                for result in self._memory.search_memory_sync(
+                    query,
+                    top_k=max(20, top_k * 5),
+                    project_id=project,
+                )
+                if result.chunk.memory_tier == MemoryTier.PROCEDURAL
+            ][:top_k]
+            if not scoped_results:
+                return t("memory.no_procedures", query=query)
+            scoped_lines = [t("memory.procedures_header", count=len(scoped_results))]
+            scoped_lines.extend(
+                render_untrusted_memory(result.chunk, max_chars=1000) for result in scoped_results
+            )
+            return "\n\n".join(scoped_lines)
+
         results = self._memory.procedural.find_by_keywords(keywords)
 
         if not results:
@@ -542,7 +633,16 @@ class MemoryTools:
             )
             # Body kuerzen auf 500 Zeichen
             body_short = body[:500] + "…" if len(body) > 500 else body
-            lines.append(body_short)
+            lines.append(
+                render_untrusted_context(
+                    body_short,
+                    project_id=project,
+                    source_type="legacy_procedure",
+                    source_id=f"procedure://{meta.name}",
+                    source_trust=SourceTrust.LEGACY_UNSCOPED,
+                    max_chars=500,
+                )
+            )
             lines.append("")
 
         return "\n".join(lines)
@@ -569,6 +669,12 @@ class MemoryTools:
         """
         if not name.strip():
             return t("memory.error_empty_procedure_name")
+
+        if get_active_project_id() != DEFAULT_PROJECT_ID:
+            return (
+                "Project-scoped procedures are immutable evidence; "
+                "usage ranking updates require a dedicated reviewed capability."
+            )
 
         result = self._memory.procedural.record_usage(
             name=name.strip(),

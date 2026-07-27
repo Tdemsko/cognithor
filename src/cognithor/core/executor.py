@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from cognithor.core.plan_graph import PlanGraph
 from cognithor.i18n import t
+from cognithor.memory.trust import set_active_project_id
 from cognithor.models import (
     ActionPlan,
     GateDecision,
@@ -150,8 +151,15 @@ class Executor:
             "investigate_project": 120,
             "investigate_org": 120,
         }
-        # Agent context tokens (for contextvar reset)
-        self._ctx_tokens: list[contextvars.Token[Any]] = []
+        # Agent context tokens are task-local.  Executor is shared across
+        # concurrent sessions, so an instance-level list would let one request
+        # clear another request's project/workspace context.
+        self._ctx_tokens_var: contextvars.ContextVar[tuple[contextvars.Token[Any], ...]] = (
+            contextvars.ContextVar(
+                f"executor_ctx_tokens_{id(self)}",
+                default=(),
+            )
+        )
         # Status callback (set by Gateway for progress feedback)
         self._status_callback: Any = None
         # Tactical Memory (wired by gateway after init)
@@ -233,6 +241,7 @@ class Executor:
         sandbox_overrides: dict[str, Any] | None = None,
         agent_name: str = "",
         session_id: str = "",
+        project_id: str = "default",
     ) -> None:
         """Set the agent context for the next execution.
 
@@ -245,15 +254,19 @@ class Executor:
                 (network, max_memory_mb, timeout, etc.)
             agent_name: Name of the active agent (for audit/monitor).
             session_id: Session ID for profiling/telemetry.
+            project_id: Deterministic memory/workspace boundary.
         """
         # Reset old tokens before setting new ones
         self.clear_agent_context()
-        self._ctx_tokens = [
-            _agent_workspace_var.set(workspace_dir),
-            _agent_sandbox_var.set(sandbox_overrides),
-            _agent_name_var.set(agent_name),
-            _session_id_var.set(session_id),
-        ]
+        self._ctx_tokens_var.set(
+            (
+                _agent_workspace_var.set(workspace_dir),
+                _agent_sandbox_var.set(sandbox_overrides),
+                _agent_name_var.set(agent_name),
+                _session_id_var.set(session_id),
+                set_active_project_id(project_id),
+            )
+        )
 
     def set_fact_question_context(self, is_fact: bool) -> None:
         """Mark the current request as a factual question.
@@ -261,14 +274,15 @@ class Executor:
         When True, ``cross_check=True`` is automatically injected into
         ``search_and_read`` calls so multiple sources are compared.
         """
-        self._ctx_tokens.append(_fact_question_var.set(is_fact))
+        tokens = self._ctx_tokens_var.get()
+        self._ctx_tokens_var.set((*tokens, _fact_question_var.set(is_fact)))
 
     def clear_agent_context(self) -> None:
         """Clear the agent context after execution."""
-        for token in self._ctx_tokens:
+        for token in reversed(self._ctx_tokens_var.get()):
             with contextlib.suppress(ValueError):
                 token.var.reset(token)
-        self._ctx_tokens = []
+        self._ctx_tokens_var.set(())
 
     async def execute(
         self,
@@ -379,7 +393,10 @@ class Executor:
                 content_length=len(result.content),
             )
 
-            if self._tactical_memory is not None:
+            if (
+                self._tactical_memory is not None
+                and getattr(self._config.security, "home_lab_mode", False) is not True
+            ):
                 with contextlib.suppress(Exception):
                     self._tactical_memory.record_outcome(
                         tool=action.tool,

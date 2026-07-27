@@ -140,6 +140,8 @@ def declare_advanced_attrs(config: Any) -> PhaseResult:
     _init_subsystem("evolution_orchestrator", result, _init_gepa)
 
     def _init_strategy_memory() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.strategy_memory import StrategyMemory
 
         return StrategyMemory(db_path=Path(cognithor_home) / "index" / "strategy_memory.db")  # type: ignore[arg-type]
@@ -147,6 +149,8 @@ def declare_advanced_attrs(config: Any) -> PhaseResult:
     _init_subsystem("strategy_memory", result, _init_strategy_memory)
 
     def _init_reflexion() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.reflexion import ReflexionMemory
 
         return ReflexionMemory(data_dir=Path(cognithor_home) / "memory")
@@ -233,6 +237,8 @@ async def init_advanced(
     _init_subsystem("prompt_evolution", result, _init_prompt_evolution)
 
     def _init_session_analyzer() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.session_analyzer import SessionAnalyzer
 
         return SessionAnalyzer(data_dir=Path(cognithor_home) / "memory")
@@ -240,6 +246,8 @@ async def init_advanced(
     _init_subsystem("session_analyzer", result, _init_session_analyzer)
 
     def _init_curiosity() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.curiosity import CuriosityEngine
 
         return CuriosityEngine()
@@ -247,6 +255,8 @@ async def init_advanced(
     _init_subsystem("curiosity_engine", result, _init_curiosity)
 
     def _init_confidence() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.confidence import KnowledgeConfidenceManager
 
         return KnowledgeConfidenceManager()
@@ -254,6 +264,8 @@ async def init_advanced(
     _init_subsystem("confidence_manager", result, _init_confidence)
 
     def _init_active_learner() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.active_learner import ActiveLearner
 
         return ActiveLearner()
@@ -261,6 +273,8 @@ async def init_advanced(
     _init_subsystem("active_learner", result, _init_active_learner)
 
     def _init_exploration() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.explorer import ExplorationExecutor
 
         return ExplorationExecutor(
@@ -271,6 +285,8 @@ async def init_advanced(
     _init_subsystem("exploration_executor", result, _init_exploration)
 
     def _init_knowledge_qa() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.knowledge_qa import KnowledgeQAStore
 
         return KnowledgeQAStore(db_path=Path(cognithor_home) / "memory" / "knowledge_qa.db")
@@ -278,6 +294,8 @@ async def init_advanced(
     _init_subsystem("knowledge_qa", result, _init_knowledge_qa)
 
     def _init_knowledge_lineage() -> Any:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            return None
         from cognithor.learning.lineage import KnowledgeLineageTracker
 
         return KnowledgeLineageTracker(
@@ -293,6 +311,7 @@ async def init_advanced(
             memory=getattr(config, "_memory_manager", None),
             knowledge_builder=result.get("knowledge_builder"),
             llm_fn=result.get("llm_fn"),
+            home_lab_mode=getattr(config.security, "home_lab_mode", False) is True,
         )
 
     _init_subsystem("knowledge_ingest", result, _init_knowledge_ingest)

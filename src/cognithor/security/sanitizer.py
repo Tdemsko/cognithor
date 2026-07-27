@@ -423,7 +423,9 @@ class InputSanitizer:
         """
         dangerous = re.compile(
             r"<\s*/?(?:system|assistant|user|instruction|prompt|"
-            r"tool_result|tool_use|function_call|human_turn|ai_turn)\s*"
+            r"tool_result|tool_use|function_call|human_turn|ai_turn|"
+            r"external_content|untrusted_memory_context|"
+            r"untrusted_web_content|untrusted_tool_output)\s*"
             r"(?:\s+[^>]*)?>",
             re.IGNORECASE,
         )

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from cognithor.config import MemoryConfig
 from cognithor.memory.embeddings import EmbeddingClient, cosine_similarity
+from cognithor.memory.trust import DEFAULT_PROJECT_ID, resolve_project_id
 from cognithor.memory.vector_index import VectorIndex, create_vector_index
 from cognithor.models import MemorySearchResult, MemoryTier
 
@@ -100,6 +101,7 @@ class HybridSearch:
         self._hierarchical_retriever = hierarchical_retriever
         # Cached mapping content_hash -> [chunk_ids] (built lazily)
         self._chunk_hash_map: dict[str, list[str]] | None = None
+        self._chunk_hash_map_project: str | None = None
         # LRU cache for graph search results keyed by frozenset of query words
         self._graph_search_cache: OrderedDict[frozenset[str], dict[str, float]] = OrderedDict()
 
@@ -128,16 +130,19 @@ class HybridSearch:
         if self._chunk_hash_map is not None:
             # Load the chunk IDs for this content hash from the DB
             try:
-                chunk_ids = self._index.get_chunk_ids_by_hash(key)
+                project = self._chunk_hash_map_project or resolve_project_id()
+                chunk_ids = self._index.get_chunk_ids_by_hash(key, project_id=project)
                 self._chunk_hash_map[key] = chunk_ids
             except (AttributeError, Exception):
                 # Fallback: Full invalidation if DB method does not exist
                 self._chunk_hash_map = None
+                self._chunk_hash_map_project = None
         self._graph_search_cache.clear()
 
     def invalidate_chunk_hash_map(self) -> None:
         """Invalidiert den gecachten Chunk-Hash-Map und den Graph-Search-Cache."""
         self._chunk_hash_map = None
+        self._chunk_hash_map_project = None
         self._graph_search_cache.clear()
 
     async def _hierarchical_channel(self, query: str, top_k: int) -> dict[str, float]:
@@ -160,6 +165,7 @@ class HybridSearch:
         enable_bm25: bool = True,
         enable_vector: bool = True,
         enable_graph: bool = True,
+        project_id: str | None = None,
     ) -> list[MemorySearchResult]:
         """Fuehrt eine Hybrid-Suche durch.
 
@@ -176,6 +182,7 @@ class HybridSearch:
         """
         if not query.strip():
             return []
+        project = resolve_project_id(project_id)
 
         if top_k is None:
             top_k = self._config.search_top_k
@@ -186,7 +193,11 @@ class HybridSearch:
 
         # ── Kanal 1: BM25 ────────────────────────────────────────
         if enable_bm25 and self._config.weight_bm25 > 0:
-            bm25_results = self._index.search_bm25(query, top_k=fetch_k)
+            bm25_results = self._index.search_bm25(
+                query,
+                top_k=fetch_k,
+                project_id=project,
+            )
             if bm25_results:
                 max_bm25 = max(s for _, s in bm25_results) or 1.0
                 for chunk_id, raw_score in bm25_results:
@@ -199,11 +210,14 @@ class HybridSearch:
                 query_emb = await self._embeddings.embed_text(query)
 
                 # Use cached chunk-hash-map (via executor to avoid blocking the event loop)
-                if self._chunk_hash_map is None:
+                if self._chunk_hash_map is None or self._chunk_hash_map_project != project:
                     loop = asyncio.get_running_loop()
                     self._chunk_hash_map = await loop.run_in_executor(
-                        None, self._build_chunk_hash_map
+                        None,
+                        self._build_chunk_hash_map,
+                        project,
                     )
+                    self._chunk_hash_map_project = project
 
                 # Use VectorIndex for ANN search
                 if self._vector_index.size > 0:
@@ -233,7 +247,7 @@ class HybridSearch:
 
         # ── Kanal 3: Graph ───────────────────────────────────────
         if enable_graph and self._config.weight_graph > 0:
-            graph_chunk_scores = self._graph_search(query)
+            graph_chunk_scores = self._graph_search(query, project_id=project)
             for chunk_id, g_score in graph_chunk_scores.items():
                 scores.setdefault(chunk_id, {"bm25": 0, "vector": 0, "graph": 0})
                 scores[chunk_id]["graph"] = g_score
@@ -276,15 +290,29 @@ class HybridSearch:
                 logger.debug("Dynamische Gewichtung fehlgeschlagen (Fallback): %s", exc)
 
         # ── Kanal 4: Hierarchical ────────────────────────────────
-        hierarchical_scores = await self._hierarchical_channel(query, fetch_k)
+        # The legacy hierarchical tree store is not project-aware.  It may
+        # influence ranking only for the legacy default project; named
+        # projects fail closed until the store carries project provenance.
+        hierarchical_scores = (
+            await self._hierarchical_channel(query, fetch_k)
+            if project == DEFAULT_PROJECT_ID
+            else {}
+        )
 
         # Hierarchical weight (0 when no retriever is configured)
         _h_cfg = getattr(self._config, "hierarchical", None)
-        w_h = _h_cfg.score_weight if _h_cfg and self._hierarchical_retriever else 0.0
+        w_h = (
+            _h_cfg.score_weight
+            if (project == DEFAULT_PROJECT_ID and _h_cfg and self._hierarchical_retriever)
+            else 0.0
+        )
 
         # Batch-fetch all chunks (1 query instead of N+1)
         all_chunk_ids = list(scores.keys())
-        chunks_by_id = self._index.get_chunks_by_ids(all_chunk_ids)
+        chunks_by_id = self._index.get_chunks_by_ids(
+            all_chunk_ids,
+            project_id=project,
+        )
 
         results: list[MemorySearchResult] = []
         for chunk_id, channel_scores in scores.items():
@@ -336,12 +364,23 @@ class HybridSearch:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_k]
 
-    def search_bm25_only(self, query: str, top_k: int = 10) -> list[MemorySearchResult]:
+    def search_bm25_only(
+        self,
+        query: str,
+        top_k: int = 10,
+        *,
+        project_id: str | None = None,
+    ) -> list[MemorySearchResult]:
         """Synchrone BM25-only Suche (kein Embedding noetig).
 
         Nuetzlich fuer schnelle lexikalische Lookups.
         """
-        bm25_results = self._index.search_bm25(query, top_k=top_k)
+        project = resolve_project_id(project_id)
+        bm25_results = self._index.search_bm25(
+            query,
+            top_k=top_k,
+            project_id=project,
+        )
         if not bm25_results:
             return []
 
@@ -350,7 +389,10 @@ class HybridSearch:
 
         # Batch-fetch all chunks (1 query instead of N+1)
         bm25_chunk_ids = [cid for cid, _ in bm25_results]
-        chunks_by_id = self._index.get_chunks_by_ids(bm25_chunk_ids)
+        chunks_by_id = self._index.get_chunks_by_ids(
+            bm25_chunk_ids,
+            project_id=project,
+        )
 
         for chunk_id, raw_score in bm25_results:
             chunk = chunks_by_id.get(chunk_id)
@@ -378,7 +420,10 @@ class HybridSearch:
         results.sort(key=lambda r: r.score, reverse=True)
         return results
 
-    def _build_chunk_hash_map(self) -> dict[str, list[str]]:
+    def _build_chunk_hash_map(
+        self,
+        project_id: str | None = None,
+    ) -> dict[str, list[str]]:
         """Baut ein Mapping content_hash → [chunk_ids].
 
         Wird fuer Vektor-Suche gebraucht um von Embedding
@@ -387,13 +432,22 @@ class HybridSearch:
         Wird lazy gecacht und via run_in_executor aufgerufen,
         um den Event-Loop nicht zu blockieren.
         """
-        rows = self._index.conn.execute("SELECT id, content_hash FROM chunks").fetchall()
+        project = resolve_project_id(project_id)
+        rows = self._index.conn.execute(
+            "SELECT id, content_hash FROM chunks WHERE project_id = ?",
+            (project,),
+        ).fetchall()
         mapping: dict[str, list[str]] = {}
         for r in rows:
             mapping.setdefault(r["content_hash"], []).append(r["id"])
         return mapping
 
-    def _graph_search(self, query: str) -> dict[str, float]:
+    def _graph_search(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+    ) -> dict[str, float]:
         """Graph-basierte Suche: Findet Entitaeten die zum Query passen,
         dann Chunks die mit diesen Entitaeten verknuepft sind.
 
@@ -406,7 +460,12 @@ class HybridSearch:
         """
         # Cache key: frozenset of lowered query words
         words = query.lower().split()
-        cache_key = frozenset(words)
+        project = resolve_project_id(project_id)
+        cache_key = (
+            frozenset(words)
+            if project == "default"
+            else frozenset([*words, f"__project__:{project}"])
+        )
 
         if cache_key in self._graph_search_cache:
             self._graph_search_cache.move_to_end(cache_key)
@@ -416,7 +475,7 @@ class HybridSearch:
         matching_entity_ids: set[str] = set()
 
         for word in words:
-            for entity in self._index.search_entities(name=word):
+            for entity in self._index.search_entities(name=word, project_id=project):
                 matching_entity_ids.add(entity.id)
 
         if not matching_entity_ids:
@@ -426,14 +485,21 @@ class HybridSearch:
         # Step 2: Find related entities (1-hop)
         related_ids: set[str] = set(matching_entity_ids)
         for eid in matching_entity_ids:
-            neighbors = self._index.graph_traverse(eid, max_depth=1)
+            neighbors = self._index.graph_traverse(
+                eid,
+                max_depth=1,
+                project_id=project,
+            )
             for n in neighbors:
                 related_ids.add(n.id)
 
         # Step 3: Find chunks that reference these entities
         #   Uses SQL LIKE filtering instead of a full table scan.
         chunk_scores: dict[str, float] = {}
-        chunk_rows = self._index.get_chunks_with_entity_overlap(related_ids)
+        chunk_rows = self._index.get_chunks_with_entity_overlap(
+            related_ids,
+            project_id=project,
+        )
 
         for chunk_id, chunk_entities in chunk_rows:
             chunk_entity_set = set(chunk_entities)

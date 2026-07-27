@@ -148,8 +148,18 @@ class SkillRegistry:
             working_memory.injected_procedures = [best.skill.body]
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        allow_community_skills: bool = True,
+        allow_generated_skills: bool = True,
+    ) -> None:
         import threading
+
+        # Construction-time trust boundaries.  Restricted deployments retain
+        # this policy across later registry reloads.
+        self._allow_community_skills = allow_community_skills
+        self._allow_generated_skills = allow_generated_skills
 
         # PASS-4: ``RLock`` because ``enable``/``disable`` hold the lock
         # while calling ``_rebuild_index``, which acquires it again.
@@ -201,11 +211,14 @@ class SkillRegistry:
                     except Exception as exc:
                         log.warning("p2p_skill_load_error", dir=str(sub_dir), error=str(exc))
 
-        # Community-Skills aus ~/.cognithor/skills/community/
-        count += self._load_community_skills(directories)
+        # Downloaded and agent-authored skills are executable instructions,
+        # so restricted registries must never activate them during a reload.
+        if self._allow_community_skills:
+            count += self._load_community_skills(directories)
 
         # Generated skills (agent-authored) — loaded last, never overwrite
-        count += self.load_generated_skills(directories)
+        if self._allow_generated_skills:
+            count += self.load_generated_skills(directories)
 
         self._rebuild_index()
         log.info(

@@ -120,6 +120,8 @@ def _mock_memory_manager() -> MagicMock:
     mgr.procedural.record_usage.return_value = None
     # Episodic: append_entry is a no-op.
     mgr.episodic.append_entry.return_value = None
+    # Home-lab reflection writes project-scoped chunks through this API.
+    mgr.index_text.return_value = 1
     return mgr
 
 

@@ -227,6 +227,10 @@ class TestReflectorPopulatesRealContributions:
         session: SessionContext,
         working_memory_with_search: WorkingMemory,
     ) -> None:
+        # Channel-weight optimization is a legacy automatic-learning feature.
+        # Home-lab mode intentionally disables it, so this unit test exercises
+        # the feature only under the explicitly non-home-lab profile.
+        config.security.home_lab_mode = False
         mock_ollama.chat.return_value = {
             "message": {"content": GOOD_JSON},
             "prompt_eval_count": 10,

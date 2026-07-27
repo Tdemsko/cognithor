@@ -34,6 +34,15 @@ from cognithor.memory.multimodal import MultimodalMemory
 from cognithor.memory.procedural import ProceduralMemory
 from cognithor.memory.search import HybridSearch
 from cognithor.memory.semantic import SemanticMemory
+from cognithor.memory.trust import (
+    DEFAULT_PROJECT_ID,
+    SourceTrust,
+    apply_provenance,
+    enforce_ingest_hygiene,
+    get_active_project_id,
+    infer_source_trust,
+    resolve_project_id,
+)
 from cognithor.memory.vector_index import VectorIndex, create_vector_index
 from cognithor.memory.working import WorkingMemoryManager
 from cognithor.models import MemorySearchResult, MemoryTier
@@ -447,6 +456,7 @@ class MemoryManager:
         top_k: int | None = None,
         tier: MemoryTier | None = None,
         enhanced: bool = True,
+        project_id: str | None = None,
     ) -> list[MemorySearchResult]:
         """Durchsucht das gesamte Memory-System.
 
@@ -460,14 +470,25 @@ class MemoryManager:
             Sortierte Suchergebnisse.
         """
         k = top_k or self._mc.search_top_k
+        project = resolve_project_id(project_id)
 
         if enhanced:
-            results = await self._enhanced_search.search(query, top_k=k, tier_filter=tier)
+            results = await self._enhanced_search.search(
+                query,
+                top_k=k,
+                tier_filter=tier,
+                project_id=project,
+            )
         else:
-            results = await self._search.search(query, top_k=k, tier_filter=tier)
+            results = await self._search.search(
+                query,
+                top_k=k,
+                tier_filter=tier,
+                project_id=project,
+            )
 
         # Graph-Ranking Boost (wenn PageRank berechnet wurde)
-        if self._graph_ranking.ranks:
+        if project == DEFAULT_PROJECT_ID and self._graph_ranking.ranks:
             results = self._graph_ranking.boost_graph_scores(results)
             # Re-sort und limit nach boost
             results = sorted(results, key=lambda r: r.score, reverse=True)[:k]
@@ -486,16 +507,30 @@ class MemoryManager:
         query: str,
         *,
         top_k: int = 6,
+        project_id: str | None = None,
     ) -> list[MemorySearchResult]:
         """Synchrone BM25-only Suche (kein Embedding noetig).
 
         Schneller Fallback wenn kein Embedding-Server verfuegbar.
         """
-        return self._search.search_bm25_only(query, top_k=top_k)
+        return self._search.search_bm25_only(
+            query,
+            top_k=top_k,
+            project_id=resolve_project_id(project_id),
+        )
 
     # ── Indexing ─────────────────────────────────────────────────
 
-    def index_file(self, file_path: str | Path, tier: MemoryTier | None = None) -> int:
+    def index_file(
+        self,
+        file_path: str | Path,
+        tier: MemoryTier | None = None,
+        *,
+        project_id: str | None = None,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        source_trust: SourceTrust | str | None = None,
+    ) -> int:
         """Indexiert eine Markdown-Datei.
 
         1. Chunking
@@ -510,16 +545,32 @@ class MemoryManager:
             Anzahl indexierter Chunks.
         """
         path_str = str(file_path)
+        provenance_source = source_id or path_str
+        project = resolve_project_id(project_id)
+        trust = (
+            SourceTrust(source_trust)
+            if source_trust is not None
+            else infer_source_trust(provenance_source)
+        )
 
-        # Alte Chunks fuer diese Datei entfernen
-        self._index.delete_chunks_by_source(path_str)
-
-        # Neu chunken
+        # Read, validate, and decorate before replacing durable state.
         chunks = chunk_file(path_str, config=self._mc, tier=tier)
         if not chunks:
             return 0
+        enforce_ingest_hygiene(
+            content="\n".join(chunk.text for chunk in chunks),
+            source_id=provenance_source,
+            source_trust=trust,
+        )
+        chunks = apply_provenance(
+            chunks,
+            project_id=project,
+            source_id=provenance_source,
+            source_type=source_type,
+            source_trust=trust,
+        )
 
-        # In DB speichern
+        self._index.delete_chunks_by_source(path_str, project_id=project)
         count = self._index.upsert_chunks(chunks)
         logger.debug("Indexiert: %s → %d Chunks", path_str, count)
         return count
@@ -529,6 +580,11 @@ class MemoryManager:
         text: str,
         source_path: str,
         tier: MemoryTier | None = None,
+        *,
+        project_id: str | None = None,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        source_trust: SourceTrust | str | None = None,
     ) -> int:
         """Indexiert einen Text direkt (ohne Datei).
 
@@ -540,7 +596,18 @@ class MemoryManager:
         Returns:
             Anzahl indexierter Chunks.
         """
-        self._index.delete_chunks_by_source(source_path)
+        provenance_source = source_id or source_path
+        project = resolve_project_id(project_id)
+        trust = (
+            SourceTrust(source_trust)
+            if source_trust is not None
+            else infer_source_trust(provenance_source)
+        )
+        enforce_ingest_hygiene(
+            content=text,
+            source_id=provenance_source,
+            source_trust=trust,
+        )
 
         chunks = chunk_text(
             text,
@@ -551,7 +618,15 @@ class MemoryManager:
         )
         if not chunks:
             return 0
+        chunks = apply_provenance(
+            chunks,
+            project_id=project,
+            source_id=provenance_source,
+            source_type=source_type,
+            source_trust=trust,
+        )
 
+        self._index.delete_chunks_by_source(source_path, project_id=project)
         count = self._index.upsert_chunks(chunks)
 
         return count
@@ -560,6 +635,11 @@ class MemoryManager:
         self,
         file_path: str | Path,
         tier: MemoryTier | None = None,
+        *,
+        project_id: str | None = None,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        source_trust: SourceTrust | str | None = None,
     ) -> int:
         """Indexiert eine Datei mit Embeddings.
 
@@ -571,13 +651,32 @@ class MemoryManager:
             Anzahl indexierter Chunks.
         """
         path_str = str(file_path)
-        self._index.delete_chunks_by_source(path_str)
+        provenance_source = source_id or path_str
+        project = resolve_project_id(project_id)
+        trust = (
+            SourceTrust(source_trust)
+            if source_trust is not None
+            else infer_source_trust(provenance_source)
+        )
 
         chunks = chunk_file(path_str, config=self._mc, tier=tier)
         if not chunks:
             return 0
+        enforce_ingest_hygiene(
+            content="\n".join(chunk.text for chunk in chunks),
+            source_id=provenance_source,
+            source_trust=trust,
+        )
+        chunks = apply_provenance(
+            chunks,
+            project_id=project,
+            source_id=provenance_source,
+            source_type=source_type,
+            source_trust=trust,
+        )
 
         # Chunks speichern
+        self._index.delete_chunks_by_source(path_str, project_id=project)
         self._index.upsert_chunks(chunks)
 
         # Embeddings generieren (Cache-aware, #46 Optimierung)
@@ -809,7 +908,12 @@ class MemoryManager:
     def stats(self) -> dict[str, Any]:
         """Gesamtstatistiken des Memory-Systems."""
         index_stats = self._index.stats()
-        proc_stats = self._procedural.stats()
+        project = get_active_project_id()
+        proc_stats = (
+            self._procedural.stats()
+            if project == DEFAULT_PROJECT_ID
+            else {"total": 0, "reliable": 0}
+        )
         emb_stats = self._embeddings.stats
 
         return {
@@ -822,7 +926,11 @@ class MemoryManager:
             "embedding_cache_hits": emb_stats.cache_hits,
             "embedding_api_calls": emb_stats.api_calls,
             "core_memory_loaded": bool(self._core.content),
-            "episode_dates": len(self._episodic.list_dates()),
+            "episode_dates": (
+                len(self._episodic.list_dates())
+                if project == DEFAULT_PROJECT_ID
+                else self._index.count_chunks(MemoryTier.EPISODIC, project_id=project)
+            ),
             "initialized": self._initialized,
             "multimodal_assets": self._multimodal.asset_count,
             "graph_ranking_computed": self._graph_ranking.last_computed is not None,
@@ -872,6 +980,11 @@ class MemoryManager:
         Returns:
             The ``DocumentTree`` built from the source file.
         """
+        if get_active_project_id() != DEFAULT_PROJECT_ID:
+            raise RuntimeError(
+                "Hierarchical document storage is not project-aware; "
+                "named-project indexing is disabled"
+            )
         if not self._hierarchical_manager:
             raise RuntimeError("Hierarchical indexing not enabled")
         return await self._hierarchical_manager.index_document(
@@ -880,12 +993,19 @@ class MemoryManager:
 
     async def remove_hierarchical_document(self, document_id: str) -> None:
         """Remove a document from the hierarchical store."""
+        if get_active_project_id() != DEFAULT_PROJECT_ID:
+            raise RuntimeError(
+                "Hierarchical document storage is not project-aware; "
+                "named-project deletion is disabled"
+            )
         if not self._hierarchical_manager:
             raise RuntimeError("Hierarchical indexing not enabled")
         await self._hierarchical_manager.remove_document(document_id)
 
     async def list_hierarchical_documents(self) -> list[Any]:
         """List all hierarchically indexed documents."""
+        if get_active_project_id() != DEFAULT_PROJECT_ID:
+            return []
         if not self._hierarchical_manager:
             return []
         return cast("list[Any]", await self._hierarchical_manager.list_documents())
@@ -896,6 +1016,11 @@ class MemoryManager:
         Returns:
             The newly built ``DocumentTree``.
         """
+        if get_active_project_id() != DEFAULT_PROJECT_ID:
+            raise RuntimeError(
+                "Hierarchical document storage is not project-aware; "
+                "named-project reindexing is disabled"
+            )
         if not self._hierarchical_manager:
             raise RuntimeError("Hierarchical indexing not enabled")
         return await self._hierarchical_manager.reindex_document(document_id)

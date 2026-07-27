@@ -74,6 +74,23 @@ This profile is for one operator in a home network:
 24. Known API credentials and private keys are removed before model input in
     home-lab mode. Sensitive-key values and recognized secret patterns are
     redacted from both authoritative and operational audit records.
+25. Every named project has an independent memory namespace. Named projects
+    never inherit legacy global memory, even when a caller omits a project
+    filter or a historical database row predates project scoping.
+26. Retrieved web, file, tool, and memory content is untrusted evidence, never
+    authority. Model-visible evidence is provenance-checked, structurally
+    delimited, and explicitly prohibited from overriding policy or system
+    instructions.
+27. External evidence cannot silently become durable memory. Home-lab
+    reflection may store only project-scoped `agent_inference` evidence;
+    procedure learning remains a reviewable proposal.
+28. Public-ingestion HTTP validates every resolved address and every redirect,
+    rejects private/link-local/loopback/metadata destinations, bounds response
+    size, and redacts query/credential material from logs.
+29. Community and generated skills are disabled at registry construction in
+    home-lab mode. Configuration reload cannot silently re-enable them.
+30. Persisted memory without valid source, project, trust, authority, and
+    integrity metadata is quarantined before retrieval or model rendering.
 
 ## Risk policy
 
@@ -187,6 +204,50 @@ It does not yet represent every external connector as migrated to a single
 per-capability secret broker. That integration work remains a follow-up and
 must pass its own three-round acceptance cycle.
 
+## Fourth release-candidate scope
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+The Project Memory, Provenance, and Untrusted-Evidence Boundary release
+candidate adds:
+
+- request-scoped project identity propagated through gateway, planner,
+  reflector, retrieval, MCP memory, vault, and persistence paths;
+- idempotent schema migration and fail-closed filtering for project-scoped
+  chunks, entities, relations, search results, caches, and graph traversal;
+- source/trust/authority/content-hash provenance created at ingestion and
+  verified both at index write and immediately before model rendering;
+- quarantine of forged, missing, or database-tampered provenance;
+- explicit untrusted-evidence envelopes for retrieved memory, web, and tool
+  output, including delimiter-breakout neutralization;
+- prevention of silent project switching after a session contains messages;
+- home-lab reflection limited to audited, project-scoped
+  `agent_inference` evidence and review-only procedure proposals;
+- disabled automatic learning and advanced self-improvement services in
+  home-lab mode;
+- construction-time prohibition of community and generated skill loading;
+- fail-closed public-ingestion networking with DNS/address/redirect checks,
+  private and metadata destination denial, bounded bodies, and redacted logs;
+- append-only events for project reflection evidence and procedure proposals.
+
+All three rounds in `TEST_EVIDENCE.md` passed on 2026-07-27.
+
+- Round 1 final regression: 18,979 passed, 39 skipped, zero failed.
+- Round 2 adversarial/integration/failure testing: 3,991 passed, 7 skipped,
+  zero failed.
+- Round 3 release-candidate, installed-wheel, recovery, isolation, and copied-
+  source regression gates: 1,810 passed, zero failed across the recorded
+  non-overlapping commands, plus all installed-artifact probes.
+- Weighted release score: 99.625/100.
+- Unresolved Critical findings in this candidate: zero.
+- Unresolved High findings in this candidate: zero.
+
+This candidate secures Cognithor's project-memory and knowledge-ingestion
+paths. The generic MCP web client and interactive browser redirect paths are
+not represented as covered by this acceptance; they remain disabled or
+approval-constrained under the existing home-lab policy until a separate
+network-boundary candidate passes the same three-round process.
+
 ## Accepted evidence for this release candidate
 
 The three required rounds completed on 2026-07-26. The detailed command and
@@ -222,3 +283,14 @@ not claim that the complete Thomas AI end-state architecture is finished.
 3. **Low — unrelated upstream lint debt.** A whole-repository Ruff run reports
    pre-existing issues in untouched `contrib/` and `scripts/` files. Every
    Python file in this patch set passes Ruff and formatting checks.
+4. **Medium — generic browser/web redirect enforcement is a separate gate.**
+   The public knowledge-ingestion controller is protected in this candidate.
+   Generic MCP web requests and browser automation require a separate
+   redirect-aware egress patch and target-network test before unattended use.
+5. **Medium — DNS validation and connect are not atomic on this macOS test
+   host.** Application-level checks reject every resolved private address and
+   redirect. Deployment must additionally enforce worker/control-plane egress
+   at the container/VM firewall so DNS rebinding cannot cross the boundary.
+6. **Low — legacy default-project compatibility remains intentionally
+   readable.** It exists only for unscoped historical installations. Named
+   projects cannot retrieve or promote that legacy global memory.

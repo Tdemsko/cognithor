@@ -95,21 +95,26 @@ async def init_agents(
     from cognithor.cron.engine import CronEngine
 
     result: PhaseResult = {}
+    home_lab_mode = bool(getattr(getattr(config, "security", None), "home_lab_mode", True))
 
     # Skill Registry (loads skills from procedures + user skills)
     skill_registry = None
     try:
         from cognithor.skills.registry import SkillRegistry
 
-        skill_registry = SkillRegistry()
+        skill_registry = SkillRegistry(
+            allow_community_skills=not home_lab_mode,
+            allow_generated_skills=not home_lab_mode,
+        )
         skill_dirs = [
             cognithor_home / "data" / "procedures",
             cognithor_home / config.plugins.skills_dir,
         ]
-        # Ensure generated skills directory exists (loaded automatically
-        # by SkillRegistry.load_generated_skills via the skills parent dir)
         generated_dir = cognithor_home / "skills" / "generated"
-        generated_dir.mkdir(parents=True, exist_ok=True)
+        if not home_lab_mode:
+            # Generated skills are intentionally absent from the deterministic
+            # home-lab startup path.
+            generated_dir.mkdir(parents=True, exist_ok=True)
         # Also check repo data/procedures directory
         repo_procedures = Path(__file__).parent.parent.parent.parent.parent / "data" / "procedures"
         if repo_procedures.exists():
@@ -131,17 +136,20 @@ async def init_agents(
 
     # Create SkillLifecycleManager for periodic auditing
     skill_lifecycle = None
-    try:
-        from cognithor.skills.lifecycle import SkillLifecycleManager
+    if home_lab_mode:
+        log.info("generated_skill_lifecycle_disabled_home_lab")
+    else:
+        try:
+            from cognithor.skills.lifecycle import SkillLifecycleManager
 
-        generated_dir = cognithor_home / "skills" / "generated"
-        skill_lifecycle = SkillLifecycleManager(
-            registry=skill_registry,  # type: ignore[arg-type]
-            generated_dir=generated_dir,
-        )
-        log.info("skill_lifecycle_manager_created")
-    except Exception:
-        log.debug("skill_lifecycle_manager_creation_failed", exc_info=True)
+            generated_dir = cognithor_home / "skills" / "generated"
+            skill_lifecycle = SkillLifecycleManager(
+                registry=skill_registry,  # type: ignore[arg-type]
+                generated_dir=generated_dir,
+            )
+            log.info("skill_lifecycle_manager_created")
+        except Exception:
+            log.debug("skill_lifecycle_manager_creation_failed", exc_info=True)
     result["skill_lifecycle"] = skill_lifecycle
 
     # Agent Router (multi-agent routing + audit)

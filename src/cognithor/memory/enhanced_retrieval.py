@@ -1239,6 +1239,7 @@ class EnhancedSearchPipeline:
         *,
         top_k: int = 6,
         tier_filter: MemoryTier | None = None,
+        project_id: str | None = None,
     ) -> list[MemorySearchResult]:
         """Fuehrt die vollstaendige Enhanced-Search-Pipeline aus.
 
@@ -1264,6 +1265,7 @@ class EnhancedSearchPipeline:
                 sq,
                 top_k=top_k * 2,
                 tier_filter=tier_filter,
+                project_id=project_id,
             )
             all_results.append(results)
 
@@ -1287,6 +1289,7 @@ class EnhancedSearchPipeline:
                         alt_query,
                         top_k=top_k,
                         tier_filter=tier_filter,
+                        project_id=project_id,
                     )
                     all_results.append(retry_results)
 

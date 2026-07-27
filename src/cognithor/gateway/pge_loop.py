@@ -156,16 +156,18 @@ async def run_pge_loop(
     )
     _lower_msg = msg.text.lower().strip()
     _is_correction = any(t in _lower_msg for t in _CORRECTION_TRIGGERS)
+    _security = getattr(getattr(gw, "_config", None), "security", None)
+    _home_lab_mode = getattr(_security, "home_lab_mode", False) is True
 
     if _is_correction and session.iteration_count > 0:
         log.info("live_correction_detected", text_len=len(msg.text))
-        if hasattr(gw, "_correction_memory") and gw._correction_memory:
+        if not _home_lab_mode and hasattr(gw, "_correction_memory") and gw._correction_memory:
             gw._correction_memory.store(
                 user_message=getattr(session, "last_user_message", "") or "",
                 correction_text=msg.text,
             )
         # Feed correction into Evolution Engine as learning gap
-        if hasattr(gw, "_deep_learner") and gw._deep_learner:
+        if not _home_lab_mode and hasattr(gw, "_deep_learner") and gw._deep_learner:
             try:
                 last_msg = getattr(session, "last_user_message", "") or msg.text
                 gap = f"User-Korrektur: {last_msg[:100]} → {msg.text[:100]}"
@@ -796,9 +798,13 @@ async def run_pge_loop(
                 sandbox_overrides=route_decision.agent.get_sandbox_config(),
                 agent_name=route_decision.agent.name,
                 session_id=session.session_id,
+                project_id=session.project_id,
             )
         else:
-            gw._executor.set_agent_context(session_id=session.session_id)
+            gw._executor.set_agent_context(
+                session_id=session.session_id,
+                project_id=session.project_id,
+            )
 
         # Faktenfrage: cross_check fuer search_and_read auto-injizieren
         # (muss NACH set_agent_context, da dieses clear_agent_context aufruft)
