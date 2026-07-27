@@ -29,6 +29,10 @@ from pathlib import Path
 from typing import Any
 
 from cognithor.i18n import t
+from cognithor.security.network_guard import (
+    install_playwright_public_egress_guard,
+    redact_url_for_log,
+)
 from cognithor.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -100,6 +104,8 @@ class BrowserTool:
         self._context: Any = None
         self._page: Any = None
         self._initialized = False
+        self._network_resolver: Any = None
+        self._playwright_factory: Any = None
 
         # Read browser config values, falling back to module-level defaults
         browser_cfg = getattr(config, "browser", None) if config else None
@@ -124,9 +130,13 @@ class BrowserTool:
             return True
 
         try:
-            from playwright.async_api import async_playwright
+            if self._playwright_factory is None:
+                from playwright.async_api import async_playwright
 
-            self._playwright = await async_playwright().start()
+                playwright_factory = async_playwright
+            else:
+                playwright_factory = self._playwright_factory
+            self._playwright = await playwright_factory().start()
             self._browser = await self._playwright.chromium.launch(
                 headless=self._headless,
                 args=[
@@ -137,10 +147,15 @@ class BrowserTool:
             )
             self._context = await self._browser.new_context(
                 viewport=self._viewport,
+                service_workers="block",
                 user_agent=(
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 ),
+            )
+            await install_playwright_public_egress_guard(
+                self._context,
+                resolver=self._network_resolver,
             )
             self._page = await self._context.new_page()
             self._page.set_default_timeout(self._timeout_ms)
@@ -155,7 +170,8 @@ class BrowserTool:
             )
             return False
         except Exception as exc:
-            log.error("browser_init_failed", error=str(exc))
+            log.error("browser_init_failed", error_type=type(exc).__name__)
+            await self.close()
             return False
 
     async def close(self) -> None:
@@ -225,7 +241,10 @@ class BrowserTool:
         return None
 
     @staticmethod
-    async def _validate_resolved_host(url: str) -> str | None:
+    async def _validate_resolved_host(
+        url: str,
+        resolver: Any = None,
+    ) -> str | None:
         """DNS-layer SSRF check — resolve hostname and reject if any A/AAAA
         record is loopback / private / link-local / multicast / reserved.
 
@@ -257,19 +276,21 @@ class BrowserTool:
         except ValueError:
             pass
 
-        loop = asyncio.get_running_loop()
         try:
-            infos = await loop.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+            if resolver is not None:
+                resolved_addresses = await resolver(
+                    hostname,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                )
+            else:
+                loop = asyncio.get_running_loop()
+                infos = await loop.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+                resolved_addresses = [str(info[4][0]) for info in infos if info[4] and info[4][0]]
         except OSError:
-            # Resolution failure — let the navigate call surface the real
-            # error rather than mask it as SSRF.
-            return None
+            # A destination that cannot be validated is not safe to contact.
+            return t("browser.private_address_blocked", hostname=hostname)
 
-        for info in infos:
-            sockaddr = info[4]
-            ip_str = sockaddr[0] if sockaddr else ""
-            if not ip_str:
-                continue
+        for ip_str in resolved_addresses:
             # IPv6 zone IDs ("fe80::1%eth0") break ipaddress; strip them.
             ip_clean = ip_str.split("%", 1)[0]
             try:
@@ -304,7 +325,7 @@ class BrowserTool:
         if err := self._validate_url(url):
             return BrowserResult(success=False, url=url, error=err)
         # ... dann DNS-Schicht (DNS-Rebinding-Defense).
-        if err := await self._validate_resolved_host(url):
+        if err := await self._validate_resolved_host(url, self._network_resolver):
             return BrowserResult(success=False, url=url, error=err)
 
         try:
@@ -322,7 +343,11 @@ class BrowserTool:
                     )
 
             status = response.status if response else 0
-            log.info("browser_navigate", url=url, status=status, title=title)
+            log.info(
+                "browser_navigate",
+                url=redact_url_for_log(current_url),
+                status=status,
+            )
 
             return BrowserResult(
                 success=True,
@@ -331,7 +356,11 @@ class BrowserTool:
                 title=title,
             )
         except Exception as exc:
-            log.error("browser_navigate_failed", url=url, error=str(exc))
+            log.error(
+                "browser_navigate_failed",
+                url=redact_url_for_log(url),
+                error_type=type(exc).__name__,
+            )
             return BrowserResult(
                 success=False,
                 url=url,

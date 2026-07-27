@@ -1072,3 +1072,308 @@ namespace/container runtime on the macOS validation host. Deployment still
 requires an Ubuntu worker/container escape and VM-firewall private-egress
 test. Generic MCP web/browser redirect enforcement is deliberately outside
 this candidate and remains a separate three-round release gate.
+
+## Release candidate: Generic Web and Browser Egress Boundary
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+Date: 2026-07-27
+
+Candidate parent:
+`f31bdb3007733e5950b500d21a2fd8a96e6e1193`
+
+Frozen vendor baseline:
+`78212af5396fd42cb7103b9edfe9b2e57909aac5`
+
+### Scope and threat cases
+
+This candidate closes the generic network paths intentionally left outside
+the project-memory candidate:
+
+- MCP `web_fetch`, `http_request`, and Jina Reader fetches;
+- v14 basic Playwright browser tools;
+- v17 autonomous Playwright browser tools;
+- every redirect hop and every current DNS answer;
+- HTTP and WebSocket browser traffic, including subresources and popups in
+  the guarded context;
+- service-worker, private-address, local-name, metadata, oversized-response,
+  redirect-body-replay, credential-forwarding, and HTTPS-downgrade attacks;
+- explicit R4 policy for v17 browser mutations.
+
+The application check is intentionally not represented as a substitute for
+the target VM/container firewall. DNS validation and the later kernel/browser
+connect are not atomic on this macOS test host.
+
+### Findings found and repaired before the formal rounds
+
+The first focused compatibility run was rejected with 25 failures from stale
+tests that mocked the old direct `httpx` path. Product policy was not weakened.
+The tests were migrated to the bounded request primitive and deterministic
+resolver/transport injection.
+
+The next focused run found nine remaining stale mocks/fixtures:
+
+```text
+9 failed, 455 passed
+```
+
+After repair:
+
+```text
+464 passed
+```
+
+Static review then found and repaired:
+
+1. one strict-mypy address tuple mismatch;
+2. cross-origin 307/308 request-body replay;
+3. HTTPS redirect downgrade;
+4. CONNECT/TRACE availability in the generic helper;
+5. URL paths and raw exception strings retained in network logs;
+6. v17 browser mutations relying on unknown-tool fallback rather than an
+   explicit R4 policy set.
+
+The first post-repair focused run was rejected with four deterministic fixture
+and expected-message mismatches:
+
+```text
+4 failed, 465 passed
+```
+
+After fixing only the test harness:
+
+```text
+469 passed
+```
+
+The broad pre-gate security/browser/web confirmation then passed:
+
+```text
+814 passed in 5.93s
+```
+
+### Round 1 — static, unit, security contracts, dependencies/config
+
+Status: **PASS AFTER REJECTED PRE-GATE RUNS AND REPAIR**
+
+Static/configuration gates:
+
+```text
+git diff --check
+.venv/bin/ruff check <all changed Python files>
+.venv/bin/ruff format --check <all changed Python files>
+.venv/bin/mypy --strict <six changed source files>
+.venv/bin/python -m pip check
+.venv/bin/python -m pip_audit
+```
+
+Results:
+
+- diff whitespace/error check: pass;
+- Ruff lint: pass;
+- Ruff format: pass after the first check correctly rejected three files,
+  which were mechanically formatted;
+- strict mypy: success on six changed source files;
+- dependency consistency: `No broken requirements found`;
+- live vulnerability audit: `No known vulnerabilities found`.
+
+The first `pip_audit` attempt was ineligible because the restricted runner
+blocked PyPI DNS. The approved live rerun passed; no dependency was changed.
+
+Focused security-contract and compatibility result after the final policy
+additions:
+
+```text
+814 passed, 0 failed
+```
+
+Clean full regression:
+
+```text
+19023 passed, 39 skipped, 3547 warnings in 770.26s (0:12:50)
+```
+
+The warnings are the same upstream deprecation notices recorded in prior
+candidates. No warning represents a failed assertion or a newly introduced
+security condition.
+
+### Round 2 — integration, adversarial, bypass, failure injection
+
+Status: **PASS**
+
+Security/adversarial/permission-bypass selection:
+
+```text
+2332 passed, 5 skipped, 2 warnings in 28.36s
+```
+
+Integration/E2E selection:
+
+```text
+1421 passed, 2 skipped, 1 warning in 40.15s
+```
+
+Chaos, worker retry, distributed locking, workflow, executor, and idempotency
+selection:
+
+```text
+313 passed in 28.00s
+```
+
+Round 2 aggregate:
+
+```text
+4066 passed, 7 skipped, 0 failed
+```
+
+The candidate-specific adversarial contracts prove:
+
+- a public URL cannot redirect generic HTTP or browser traffic into
+  RFC1918/private, loopback, link-local, CGNAT, reserved, multicast, local,
+  or metadata destinations;
+- every redirect is revalidated before a second request;
+- cross-origin authorization/cookies are stripped;
+- cross-origin 307/308 cannot replay a body or side-effecting method;
+- HTTPS cannot redirect to plaintext HTTP;
+- Host, forwarding, proxy, smuggling, CONNECT, and TRACE inputs are rejected;
+- declared and streamed responses are bounded before model rendering;
+- WebSocket destinations pass the same public-egress policy;
+- missing WebSocket interception disables browser startup;
+- v14 and v17 contexts block service workers and install the guard before the
+  first page;
+- v17 mutation tools remain R4 and global-safe-mode denied.
+
+### Round 3 — installed RC, system isolation, rollback, regression
+
+Status: **PASS AFTER DISPOSABLE BUILD-HARNESS REPAIR**
+
+Release suite:
+
+```text
+4 passed in 1.23s
+```
+
+Rollback/system suite:
+
+```text
+214 passed in 1.14s
+```
+
+Separately isolated voice-WebSocket suite:
+
+```text
+16 passed in 0.14s
+```
+
+A source copy was created at:
+
+```text
+/private/tmp/cognithor-candidate5-rc.4WRA80/source
+```
+
+The copy excluded `.git`, the project `.venv`, bytecode, and tool caches. The
+first wheel build was rejected before artifact creation because the project
+venv did not contain Hatchling. A disposable build venv was created under the
+same temporary release directory and received only:
+
+```text
+build 1.5.0
+hatchling 1.31.0
+packaging 26.2
+pathspec 1.1.1
+pluggy 1.6.0
+pyproject_hooks 1.2.0
+trove-classifiers 2026.6.1.19
+```
+
+The first package download attempt was blocked by sandbox DNS and was
+ineligible. The approved network rerun succeeded. Neither the system Python
+nor the project venv was modified.
+
+Disposable build result:
+
+```text
+Successfully built cognithor-0.99.0.tar.gz
+Successfully built cognithor-0.99.0-py3-none-any.whl
+Successfully installed cognithor-0.99.0 into wheel-target
+```
+
+Installed-artifact probes:
+
+```text
+private_redirect_guard=PASS
+cross_origin_replay_guard=PASS
+response_bound=PASS
+sandbox_fail_closed=PASS
+installed_import=PASS
+network_log_redaction=PASS
+```
+
+The sandbox probe attempted to create a marker. Because the macOS runner has
+no namespace backend, execution was refused and the marker did not exist.
+
+The copied source was forced ahead of the editable project installation and
+its import path was positively asserted. Its isolated candidate regression
+passed:
+
+```text
+copied_source_import=PASS
+843 passed, 11 warnings in 14.54s
+```
+
+Rollback was tested by installing the prior accepted Candidate 4 wheel into a
+separate rollback target and importing it from that exact target:
+
+```text
+previous_accepted_artifact_restore=PASS
+rollback_import=PASS
+```
+
+Round 3 non-overlapping pytest aggregate:
+
+```text
+1077 passed, 0 failed
+```
+
+All installed-artifact, sandbox-refusal, copied-source, and rollback probes
+also passed.
+
+The upstream full regression rewrote twelve sample-skill fixtures and created
+two 12 KiB MagicMock-named SQLite files. Each file was positively identified
+as test-generated. Only those fixture changes were restored from the accepted
+parent, and only those two generated databases were removed. The candidate
+diff was rechecked afterward and contained only its intended files.
+
+After evidence and consolidation documentation was added, the first final
+integrity selection returned `138 passed, 1 failed`. The only failure was the
+release wheel test attempting to download Hatchling while outbound DNS was
+sandboxed. The exact unchanged selection was rerun with approved package-index
+access and passed:
+
+```text
+139 passed in 0.99s
+```
+
+No product code, assertion, or dependency was changed between those runs.
+
+### Acceptance score
+
+All candidate hard gates passed. Zero unresolved Critical or High findings in
+the accepted candidate scope.
+
+| Dimension | Weight | Result | Weighted |
+|---|---:|---:|---:|
+| Generic HTTP/browser/WebSocket boundary correctness | 40 | 100.0 | 40.000 |
+| Regression and compatibility | 20 | 100.0 | 20.000 |
+| Adversarial, bypass, integration, failure behavior | 20 | 100.0 | 20.000 |
+| Packaging, isolation, rollback, recovery | 15 | 97.5 | 14.625 |
+| Evidence, maintainability, upstream discipline | 5 | 100.0 | 5.000 |
+| **Total** | **100** |  | **99.625 / 100** |
+
+Reported release score: **99.625/100 — PASS**
+
+The 2.5-point packaging/isolation deduction reflects the absence of a live
+Ubuntu firewall and Chromium binary in the macOS validation environment.
+Deployment remains blocked until the exact accepted artifact passes live
+Chromium HTTP/WebSocket denial and VM/container firewall private-network
+egress tests in the disposable Ubuntu trust zone.

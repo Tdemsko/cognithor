@@ -150,7 +150,7 @@ async def test_response_size_is_bounded_by_header_and_stream() -> None:
 def test_url_logging_redacts_credentials_query_and_fragment() -> None:
     assert (
         redact_url_for_log("https://user:secret@example.com/path?token=secret#fragment")
-        == "https://example.com/path"
+        == "https://example.com"
     )
 
 

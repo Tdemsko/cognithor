@@ -91,6 +91,14 @@ This profile is for one operator in a home network:
     home-lab mode. Configuration reload cannot silently re-enable them.
 30. Persisted memory without valid source, project, trust, authority, and
     integrity metadata is quarantined before retrieval or model rendering.
+31. Generic web and browser egress validates every destination and redirect,
+    including WebSockets. Browser service workers are blocked, cross-origin
+    credentials and request bodies are not replayed, HTTPS is not downgraded,
+    and missing interception support disables the browser rather than
+    weakening the boundary.
+32. Browser interactions that can mutate external state, submit content, run
+    page JavaScript, or trigger workflows are explicit R4 actions and remain
+    denied by global safe mode.
 
 ## Risk policy
 
@@ -248,7 +256,51 @@ not represented as covered by this acceptance; they remain disabled or
 approval-constrained under the existing home-lab policy until a separate
 network-boundary candidate passes the same three-round process.
 
-## Accepted evidence for this release candidate
+## Fifth release-candidate scope
+
+Status: **ACCEPTED FOR A REVIEWABLE BRANCH COMMIT — NOT MERGED OR DEPLOYED**
+
+The Generic Web and Browser Egress Boundary release candidate adds:
+
+- one bounded public HTTP request primitive for generic fetch, arbitrary HTTP
+  requests, and Jina Reader access;
+- validation of every DNS answer and redirect target, with private, loopback,
+  link-local, CGNAT, reserved, multicast, local-name, and metadata denial;
+- explicit domain allow/block policy on every hop;
+- response-size enforcement on declared and streamed content;
+- rejection of virtual-host override, proxy, forwarding, request-smuggling,
+  CONNECT, and TRACE inputs;
+- cross-origin stripping of authorization and cookies;
+- refusal to replay request bodies or side-effecting methods to another
+  origin, and refusal of HTTPS-to-HTTP redirect downgrade;
+- Playwright interception for every HTTP request and WebSocket, with service
+  workers blocked and initialization failing closed when interception is not
+  supported;
+- fail-closed direct browser DNS resolution, URL-log origin-only redaction,
+  and no page-title logging;
+- explicit R4 classification for v17 browser mutations and safe-mode denial;
+- compatibility preservation for the existing v14 and v17 browser tool
+  registrations.
+
+All three rounds in `TEST_EVIDENCE.md` passed on 2026-07-27.
+
+- Round 1 full regression: 19,023 passed, 39 skipped, zero failed.
+- Round 2 adversarial/integration/failure testing: 4,066 passed, 7 skipped,
+  zero failed.
+- Round 3 release, rollback, WebSocket, copied-source regression, installed-
+  wheel egress, sandbox-refusal, and prior-artifact restore gates: 1,077
+  pytest cases passed, zero failed, plus every installed-artifact probe.
+- Live dependency audit: no known vulnerabilities.
+- Weighted release score: 99.625/100.
+- Unresolved Critical findings in this candidate: zero.
+- Unresolved High findings in this candidate: zero.
+
+This acceptance is a branch-quality decision, not permission to deploy. The
+application boundary is deliberately paired with a mandatory deployment
+firewall/proxy gate because DNS validation and a later browser/HTTP connect
+cannot be made atomic from this macOS test host.
+
+## Accepted evidence for the first release candidate
 
 The three required rounds completed on 2026-07-26. The detailed command and
 result record is in `TEST_EVIDENCE.md`.
@@ -283,14 +335,16 @@ not claim that the complete Thomas AI end-state architecture is finished.
 3. **Low — unrelated upstream lint debt.** A whole-repository Ruff run reports
    pre-existing issues in untouched `contrib/` and `scripts/` files. Every
    Python file in this patch set passes Ruff and formatting checks.
-4. **Medium — generic browser/web redirect enforcement is a separate gate.**
-   The public knowledge-ingestion controller is protected in this candidate.
-   Generic MCP web requests and browser automation require a separate
-   redirect-aware egress patch and target-network test before unattended use.
-5. **Medium — DNS validation and connect are not atomic on this macOS test
+4. **Medium — DNS validation and connect are not atomic on this macOS test
    host.** Application-level checks reject every resolved private address and
    redirect. Deployment must additionally enforce worker/control-plane egress
    at the container/VM firewall so DNS rebinding cannot cross the boundary.
+5. **Medium — live target-browser proof remains a deployment gate.**
+   Browser HTTP/WebSocket interception and fail-closed startup passed with
+   deterministic Playwright-compatible fakes and the installed wheel. Before
+   unattended use, the exact wheel must also pass a live Chromium run inside
+   the disposable Ubuntu trust zone with the VM firewall denying management
+   networks.
 6. **Low — legacy default-project compatibility remains intentionally
    readable.** It exists only for unscoped historical installations. Named
    projects cannot retrieve or promote that legacy global memory.

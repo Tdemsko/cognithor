@@ -23,6 +23,12 @@ from cognithor.mcp.web import (
     _truncate_text,
     register_web_tools,
 )
+from cognithor.security.network_guard import PublicHTTPResponse
+
+
+async def _public_resolver(_hostname: str, _port: int) -> list[str]:
+    return ["93.184.216.34"]
+
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -30,7 +36,10 @@ from cognithor.mcp.web import (
 @pytest.fixture()
 def web() -> WebTools:
     """WebTools ohne Backend-Konfiguration."""
-    return WebTools()
+    instance = WebTools()
+    instance._network_resolver = _public_resolver
+    instance._dns_cache.set("example.com", ["93.184.216.34"])
+    return instance
 
 
 @pytest.fixture()
@@ -348,19 +357,16 @@ class TestWebFetch:
     async def test_fetch_html_extracts_text(self, web: WebTools) -> None:
         """Fetch mit trafilatura-Extraktion."""
         html = "<html><body><h1>Titel</h1><p>Inhalt der Seite.</p></body></html>"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.headers = {"content-type": "text/html; charset=utf-8"}
-        mock_response.content = html.encode("utf-8")
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        response = PublicHTTPResponse(
+            body=html.encode(),
+            final_url="https://example.com",
+            content_type="text/html; charset=utf-8",
+            status_code=200,
+        )
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(return_value=response),
+        ):
             result = await web.web_fetch("https://example.com")
             assert isinstance(result, str)
             # Text sollte extrahiert sein (entweder via trafilatura oder Fallback)
@@ -369,19 +375,16 @@ class TestWebFetch:
     @pytest.mark.asyncio()
     async def test_fetch_plain_text(self, web: WebTools) -> None:
         """Fetch von Nicht-HTML → direkt als Text."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.headers = {"content-type": "text/plain"}
-        mock_response.content = b"Hello World"
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        response = PublicHTTPResponse(
+            body=b"Hello World",
+            final_url="https://example.com/file.txt",
+            content_type="text/plain",
+            status_code=200,
+        )
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(return_value=response),
+        ):
             result = await web.web_fetch("https://example.com/file.txt")
             assert "Hello World" in result
 
@@ -393,19 +396,16 @@ class TestWebFetch:
     @pytest.mark.asyncio()
     async def test_fetch_http_error(self, web: WebTools) -> None:
         """HTTP 404 → WebError."""
-        mock_response = MagicMock()
-        mock_response.status_code = 404
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Not Found", request=MagicMock(), response=mock_response
+        mock_response = MagicMock(status_code=404)
+        error = httpx.HTTPStatusError(
+            "Not Found",
+            request=MagicMock(),
+            response=mock_response,
         )
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(side_effect=error),
+        ):
             with pytest.raises(WebError, match="404"):
                 await web.web_fetch("https://example.com/not-found")
 
@@ -413,19 +413,16 @@ class TestWebFetch:
     async def test_fetch_raw_html(self, web: WebTools) -> None:
         """Fetch mit extract_text=False → Raw HTML."""
         html = "<html><body><p>Raw</p></body></html>"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.headers = {"content-type": "text/html"}
-        mock_response.content = html.encode("utf-8")
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        response = PublicHTTPResponse(
+            body=html.encode(),
+            final_url="https://example.com",
+            content_type="text/html",
+            status_code=200,
+        )
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(return_value=response),
+        ):
             result = await web.web_fetch("https://example.com", extract_text=False)
             assert "<p>Raw</p>" in result
 
@@ -482,20 +479,8 @@ class TestSearchAndRead:
             ]
         }
 
-        # Mock für Fetch
-        fetch_response = MagicMock()
-        fetch_response.status_code = 200
-        fetch_response.raise_for_status = MagicMock()
-        fetch_response.headers = {"content-type": "text/html"}
-        fetch_response.content = b"<p>Inhalt</p>"
-
-        call_urls: list[str] = []
-
         async def mock_get(url, **kwargs):
-            call_urls.append(str(url))
-            if "localhost" in str(url):
-                return search_response
-            return fetch_response
+            return search_response
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
@@ -504,7 +489,12 @@ class TestSearchAndRead:
             mock_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = mock_instance
 
-            result = await web.search_and_read("test query", num_results=1)
+            with patch.object(
+                web,
+                "web_fetch",
+                new=AsyncMock(return_value="Inhalt der gelesenen Seite"),
+            ):
+                result = await web.search_and_read("test query", num_results=1)
             assert "test query" in result
             urls_in_result = re.findall(r"https?://\S+", result)
             assert urls_in_result, "Es sollten URLs im Ergebnis enthalten sein."
@@ -574,19 +564,17 @@ class TestHttpRequest:
     @pytest.mark.asyncio
     async def test_http_request_get(self, web: WebTools) -> None:
         """GET-Request funktioniert."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.text = '{"ok": true}'
-
-        mock_client = AsyncMock()
-        mock_client.request = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        response = PublicHTTPResponse(
+            body=b'{"ok": true}',
+            final_url="https://api.example.com/data",
+            content_type="application/json",
+            status_code=200,
+        )
+        request = AsyncMock(return_value=response)
 
         with (
             patch.object(web, "_validate_url", return_value="https://api.example.com/data"),
-            patch("cognithor.mcp.web.httpx.AsyncClient", return_value=mock_client),
+            patch("cognithor.mcp.web.request_public_http", new=request),
         ):
             result = await web.http_request("https://api.example.com/data")
 
@@ -596,19 +584,17 @@ class TestHttpRequest:
     @pytest.mark.asyncio
     async def test_http_request_post_with_body(self, web: WebTools) -> None:
         """POST mit JSON-Body."""
-        mock_response = MagicMock()
-        mock_response.status_code = 201
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.text = '{"id": 42}'
-
-        mock_client = AsyncMock()
-        mock_client.request = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        response = PublicHTTPResponse(
+            body=b'{"id": 42}',
+            final_url="https://api.example.com/items",
+            content_type="application/json",
+            status_code=201,
+        )
+        request = AsyncMock(return_value=response)
 
         with (
             patch.object(web, "_validate_url", return_value="https://api.example.com/items"),
-            patch("cognithor.mcp.web.httpx.AsyncClient", return_value=mock_client),
+            patch("cognithor.mcp.web.request_public_http", new=request),
         ):
             result = await web.http_request(
                 "https://api.example.com/items",
@@ -618,9 +604,8 @@ class TestHttpRequest:
             )
 
         assert "HTTP 201" in result
-        mock_client.request.assert_called_once()
-        call_kwargs = mock_client.request.call_args
-        assert call_kwargs[0][0] == "POST"
+        request.assert_awaited_once()
+        assert request.await_args.kwargs["method"] == "POST"
 
     @pytest.mark.asyncio
     async def test_http_request_invalid_method(self, web: WebTools) -> None:
@@ -638,14 +623,12 @@ class TestHttpRequest:
     @pytest.mark.asyncio
     async def test_http_request_timeout(self, web: WebTools) -> None:
         """Timeout-Handling."""
-        mock_client = AsyncMock()
-        mock_client.request = AsyncMock(side_effect=httpx.ReadTimeout("timeout"))
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
         with (
             patch.object(web, "_validate_url", return_value="https://slow.example.com"),
-            patch("cognithor.mcp.web.httpx.AsyncClient", return_value=mock_client),
+            patch(
+                "cognithor.mcp.web.request_public_http",
+                new=AsyncMock(side_effect=httpx.ReadTimeout("timeout")),
+            ),
         ):
             with pytest.raises(WebError, match="Timeout"):
                 await web.http_request("https://slow.example.com", timeout_seconds=1)

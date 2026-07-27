@@ -114,6 +114,14 @@ EXTERNAL_SIDE_EFFECT_TOOLS = frozenset(
         "browse_click",
         "browse_fill",
         "browse_execute_js",
+        "browser_click",
+        "browser_fill",
+        "browser_fill_form",
+        "browser_execute_js",
+        "browser_key",
+        "browser_tab",
+        "browser_workflow",
+        "browser_vision_find",
         "browser_solve_captcha",
     }
 )
