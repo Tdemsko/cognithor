@@ -53,7 +53,7 @@ class ImprovementGate:
     """Gate that controls which self-improvement domains are allowed.
 
     Logic of ``check()``:
-    1. Gate disabled? -> ALLOWED (everything passes)
+    1. Gate disabled? -> BLOCKED (self-improvement is unavailable)
     2. Domain in blocked_domains? -> BLOCKED
     3. Rate limit exceeded (max_changes_per_hour)? -> COOLDOWN
     4. Domain in cooldown (recent failure)? -> COOLDOWN
@@ -81,7 +81,8 @@ class ImprovementGate:
             GateVerdict indicating whether the action is allowed.
         """
         if not self._config.enabled:
-            return GateVerdict.ALLOWED
+            logger.info("improvement_gate_disabled", domain=domain.value)
+            return GateVerdict.BLOCKED
 
         domain_value = domain.value if isinstance(domain, ImprovementDomain) else domain
 

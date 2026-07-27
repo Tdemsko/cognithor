@@ -24,7 +24,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from cognithor.models import SandboxConfig, SandboxLevel
 from cognithor.utils.logging import get_logger
@@ -118,9 +118,22 @@ class Sandbox:
         effective_timeout = timeout or self._config.timeout_seconds
         effective_network = network if network is not None else self._config.network_access
 
-        # Downgrade if level is not available
+        # Never silently weaken isolation for generated/untrusted code.
         if effective_level not in self.available_levels:
             old = effective_level
+            if not self._config.allow_degraded_sandbox:
+                log.error(
+                    "sandbox_level_unavailable_execution_refused",
+                    requested=old.value,
+                )
+                return SandboxResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"Requested sandbox level unavailable: {old.value}",
+                    duration_ms=0,
+                    sandbox_level=old,
+                    isolation_degraded=True,
+                )
             effective_level = self.max_level
             log.warning(
                 "sandbox_level_downgrade",
@@ -217,6 +230,11 @@ class Sandbox:
         cpu_seconds = self._config.max_cpu_seconds
 
         cmd_args = shlex.split(command)
+        # ``python`` is not guaranteed to be installed as an executable name
+        # (notably in isolated Python 3.12 environments). Keep execution in
+        # the already selected interpreter instead of searching host PATH.
+        if cmd_args and cmd_args[0] == "python":
+            cmd_args[0] = sys.executable
 
         # Prefer prlimit (Linux, fork-safe) over preexec_fn (macOS fallback)
         _has_prlimit = hasattr(_resource, "prlimit")
@@ -245,8 +263,9 @@ class Sandbox:
             # Apply resource limits via prlimit after fork (Linux only, fork-safe)
             if _has_prlimit:
                 try:
-                    _resource.prlimit(proc.pid, _resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-                    _resource.prlimit(proc.pid, _resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+                    prlimit = cast("Any", _resource).prlimit
+                    prlimit(proc.pid, _resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+                    prlimit(proc.pid, _resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
                 except (ValueError, OSError, PermissionError):
                     pass  # Best-effort: limits may fail for non-root
             try:
@@ -483,6 +502,15 @@ class Sandbox:
     ) -> SandboxResult:
         """Executes command with bubblewrap (Linux namespaces)."""
         if not self._capabilities.get("bwrap"):
+            if not self._config.allow_degraded_sandbox:
+                return SandboxResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr="bubblewrap unavailable; execution refused",
+                    duration_ms=0,
+                    sandbox_level=SandboxLevel.NAMESPACE,
+                    isolation_degraded=True,
+                )
             log.warning("bwrap_not_available_fallback_to_process")
             return await self._exec_process(
                 command, working_dir=working_dir, env=env, timeout=timeout
@@ -620,6 +648,15 @@ class Sandbox:
     ) -> SandboxResult:
         """Executes command in a Docker container."""
         if not self._capabilities.get("docker"):
+            if not self._config.allow_degraded_sandbox:
+                return SandboxResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr="Docker unavailable; execution refused",
+                    duration_ms=0,
+                    sandbox_level=SandboxLevel.CONTAINER,
+                    isolation_degraded=True,
+                )
             log.warning("docker_not_available_fallback")
             return await self._exec_namespace(
                 command,
@@ -744,6 +781,15 @@ class Sandbox:
             job_handle = kernel32.CreateJobObjectW(None, None)
             if not job_handle:
                 log.warning("jobobject_create_failed", error=ctypes.get_last_error())  # type: ignore[attr-defined, unused-ignore]
+                if not self._config.allow_degraded_sandbox:
+                    return SandboxResult(
+                        exit_code=-1,
+                        stdout="",
+                        stderr="Windows Job Object creation failed; execution refused",
+                        duration_ms=0,
+                        sandbox_level=SandboxLevel.JOBOBJECT,
+                        isolation_degraded=True,
+                    )
                 return await self._exec_process(
                     command, working_dir=working_dir, env=env, timeout=timeout
                 )
@@ -777,6 +823,15 @@ class Sandbox:
             )
             if not success:
                 log.warning("jobobject_setinfo_failed", error=ctypes.get_last_error())  # type: ignore[attr-defined, unused-ignore]
+                if not self._config.allow_degraded_sandbox:
+                    return SandboxResult(
+                        exit_code=-1,
+                        stdout="",
+                        stderr="Windows Job Object limits failed; execution refused",
+                        duration_ms=0,
+                        sandbox_level=SandboxLevel.JOBOBJECT,
+                        isolation_degraded=True,
+                    )
 
             # 4. Subprocess starten
             _created_job_tmp = not working_dir
@@ -794,13 +849,35 @@ class Sandbox:
             # 5. Prozess dem Job zuweisen
             proc_handle = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, proc.pid)
             if proc_handle:
-                kernel32.AssignProcessToJobObject(job_handle, proc_handle)
+                assigned = kernel32.AssignProcessToJobObject(job_handle, proc_handle)
+                if not assigned and not self._config.allow_degraded_sandbox:
+                    proc.kill()
+                    await proc.wait()
+                    return SandboxResult(
+                        exit_code=-1,
+                        stdout="",
+                        stderr="Windows Job Object assignment failed; execution refused",
+                        duration_ms=0,
+                        sandbox_level=SandboxLevel.JOBOBJECT,
+                        isolation_degraded=True,
+                    )
             else:
                 log.warning(
                     "jobobject_openprocess_failed",
                     pid=proc.pid,
                     error=ctypes.get_last_error(),  # type: ignore[attr-defined, unused-ignore]
                 )
+                if not self._config.allow_degraded_sandbox:
+                    proc.kill()
+                    await proc.wait()
+                    return SandboxResult(
+                        exit_code=-1,
+                        stdout="",
+                        stderr="Windows process handle unavailable; execution refused",
+                        duration_ms=0,
+                        sandbox_level=SandboxLevel.JOBOBJECT,
+                        isolation_degraded=True,
+                    )
 
             # 6. Auf Abschluss warten
             try:

@@ -44,7 +44,8 @@ class TestSandboxConfig:
         cfg = SandboxConfig()
         assert cfg.max_memory_mb == 512
         assert cfg.default_timeout == 30
-        assert cfg.network == NetworkPolicy.ALLOW
+        assert cfg.network == NetworkPolicy.BLOCK
+        assert cfg.allow_bare_execution is False
 
     def test_custom_config(self) -> None:
         cfg = SandboxConfig(
@@ -185,7 +186,11 @@ class TestSandboxExecutor:
 
     @pytest.mark.asyncio
     async def test_execute_simple_command(self, tmp_path) -> None:
-        cfg = SandboxConfig(workspace_dir=tmp_path)
+        cfg = SandboxConfig(
+            workspace_dir=tmp_path,
+            preferred_level=SandboxLevel.BARE,
+            allow_bare_execution=True,
+        )
         executor = SandboxExecutor(cfg)
         if sys.platform == "win32":
             result = await executor.execute("echo hello", working_dir=str(tmp_path))
@@ -210,7 +215,11 @@ class TestSandboxExecutor:
 
     @pytest.mark.asyncio
     async def test_execute_timeout(self, tmp_path) -> None:
-        cfg = SandboxConfig(workspace_dir=tmp_path)
+        cfg = SandboxConfig(
+            workspace_dir=tmp_path,
+            preferred_level=SandboxLevel.BARE,
+            allow_bare_execution=True,
+        )
         executor = SandboxExecutor(cfg)
         if sys.platform == "win32":
             result = await executor.execute("ping -n 100 127.0.0.1", timeout=1)

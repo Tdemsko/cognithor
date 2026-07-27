@@ -38,14 +38,14 @@ def test_risk_ceiling_allows_green_with_yellow_ceiling(gk, ctx):
 
 
 def test_risk_ceiling_allows_yellow_with_yellow_ceiling(gk, ctx):
-    """A YELLOW tool (save_to_memory) should pass when ceiling is YELLOW."""
-    decision = gk.evaluate(_action("save_to_memory"), ctx, risk_ceiling="YELLOW")
+    """A YELLOW tool should pass when ceiling is YELLOW."""
+    decision = gk.evaluate(_action("atl_goals"), ctx, risk_ceiling="YELLOW")
     assert decision.status != GateStatus.BLOCK
 
 
 def test_risk_ceiling_blocks_yellow_with_green_ceiling(gk, ctx):
     """A YELLOW tool should be BLOCKED when ceiling is GREEN."""
-    decision = gk.evaluate(_action("save_to_memory"), ctx, risk_ceiling="GREEN")
+    decision = gk.evaluate(_action("atl_goals"), ctx, risk_ceiling="GREEN")
     assert decision.status == GateStatus.BLOCK
 
 

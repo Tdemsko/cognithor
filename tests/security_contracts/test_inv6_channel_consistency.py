@@ -37,7 +37,8 @@ CHANNELS = [
 
 REPRESENTATIVE_TOOLS = {
     "read_file": RiskLevel.GREEN,
-    "save_to_memory": RiskLevel.YELLOW,
+    # Durable memory promotion is approval-gated in the home-lab profile.
+    "save_to_memory": RiskLevel.ORANGE,
     "email_send": RiskLevel.ORANGE,
     "vault_delete": RiskLevel.RED,
 }

@@ -87,14 +87,17 @@ class TestRiskClassification:
             assert decision.is_allowed
 
     def test_write_operations_are_yellow(
-        self, gatekeeper: Gatekeeper, session: SessionContext
+        self,
+        gatekeeper: Gatekeeper,
+        session: SessionContext,
+        gk_config: CognithorConfig,
     ) -> None:
-        """write_file matched die Default-Policy INFORM → YELLOW."""
+        """A project-scoped write remains YELLOW/INFORM."""
         action = PlannedAction(
-            tool="write_file", params={"path": "~/.cognithor/workspace/test.txt"}
+            tool="write_file", params={"path": str(gk_config.workspace_dir / "x")}
         )
         decision = gatekeeper.evaluate(action, session)
-        # Default-Policy setzt write_file auf INFORM
+        assert decision.risk_level == RiskLevel.YELLOW
         assert decision.status in (GateStatus.INFORM, GateStatus.ALLOW)
 
     def test_email_requires_approval(self, gatekeeper: Gatekeeper, session: SessionContext) -> None:
@@ -155,19 +158,11 @@ class TestRiskClassification:
     @pytest.mark.parametrize(
         "tool",
         [
-            "save_to_memory",
             "git_commit",
             "git_branch",
             "document_export",
             "media_tts",
-            "create_skill",
-            "delegate_to_remote_agent",
             "db_connect",
-            "docker_stop",
-            "api_connect",
-            "api_call",
-            "vault_save",
-            "vault_write",
         ],
     )
     def test_yellow_tools_comprehensive(
@@ -188,6 +183,13 @@ class TestRiskClassification:
             "http_request",
             "db_execute",
             "docker_run",
+            "save_to_memory",
+            "delegate_to_remote_agent",
+            "docker_stop",
+            "api_connect",
+            "api_call",
+            "vault_save",
+            "vault_write",
         ],
     )
     def test_orange_tools_comprehensive(
@@ -198,6 +200,15 @@ class TestRiskClassification:
         decision = gatekeeper.evaluate(action, session)
         assert decision.risk_level == RiskLevel.ORANGE, f"{tool} should be ORANGE"
         assert decision.needs_approval, f"{tool} should need approval"
+
+    @pytest.mark.parametrize("tool", ["create_skill", "install_community_skill", "publish_skill"])
+    def test_self_modification_tools_are_red(
+        self, gatekeeper: Gatekeeper, session: SessionContext, tool: str
+    ) -> None:
+        """Autonomous self-modification is blocked by the home-lab floor."""
+        decision = gatekeeper.evaluate(PlannedAction(tool=tool, params={}), session)
+        assert decision.risk_level == RiskLevel.RED
+        assert decision.status == GateStatus.BLOCK
 
     @pytest.mark.parametrize(
         "tool",

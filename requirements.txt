@@ -93,7 +93,7 @@ cryptography>=46.0.5           # Credential encryption (Fernet)
 # elevenlabs>=1.0              # ElevenLabs TTS API
 
 # === Development ===
-# pytest>=8.0,<9               # Tests
+# pytest>=9.0.3,<10            # Tests
 # pytest-asyncio>=0.24,<1      # Async tests
 # pytest-cov>=6.0,<7           # Coverage
 # ruff>=0.9,<1                 # Linter

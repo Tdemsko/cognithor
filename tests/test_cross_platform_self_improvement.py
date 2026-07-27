@@ -134,7 +134,7 @@ class TestSQLitePathHandling:
 class TestMonotonicTimeCooldown:
     def test_cooldown_uses_monotonic_not_wall_clock(self):
         """time.monotonic() is not affected by system clock changes."""
-        config = ImprovementGovernanceConfig(cooldown_minutes=5)
+        config = ImprovementGovernanceConfig(enabled=True, cooldown_minutes=5)
         gate = ImprovementGate(config)
 
         gate.record_outcome(ImprovementDomain.PROMPT_TUNING, success=False)
@@ -146,7 +146,7 @@ class TestMonotonicTimeCooldown:
 
     def test_rate_limit_uses_monotonic(self):
         """Rate limit window (1 hour) is based on monotonic time."""
-        config = ImprovementGovernanceConfig(max_changes_per_hour=2)
+        config = ImprovementGovernanceConfig(enabled=True, max_changes_per_hour=2)
         gate = ImprovementGate(config)
 
         # Add 2 changes
@@ -222,7 +222,7 @@ class TestABSplitDeterminism:
 class TestConfigCrossPlatform:
     def test_improvement_governance_defaults(self):
         config = ImprovementGovernanceConfig()
-        assert config.enabled is True
+        assert config.enabled is False
         assert "prompt_tuning" in config.auto_domains
         assert "code_generation" in config.blocked_domains
         assert config.cooldown_minutes == 30

@@ -183,8 +183,10 @@ class Executor:
                 _HE.PRE_TOOL_USE, "security_extension", security_extension_hook
             )
             self._tool_hook_runner.register(_HE.POST_TOOL_USE, "audit_logging", audit_logging_hook)
-        except Exception:
-            pass  # Hooks optional
+        except Exception as exc:
+            if getattr(config.security, "require_security_controls", False):
+                raise RuntimeError("Required security control failed: executor_tool_hooks") from exc
+            log.debug("executor_tool_hooks_init_failed", exc_info=True)
 
     def reload_config(self, config: CognithorConfig) -> None:
         """Update executor limits from new config (live reload).

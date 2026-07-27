@@ -2,7 +2,7 @@
 
 Prueft dass:
   - SandboxResult.isolation_degraded existiert und default False ist
-  - SandboxConfig.allow_degraded_sandbox existiert und default True ist
+  - SandboxConfig.allow_degraded_sandbox existiert und default False ist
   - Bei CreateJobObjectW-Fehler + allow_degraded=True: Fallback mit isolation_degraded=True
   - Bei CreateJobObjectW-Fehler + allow_degraded=False: Ausfuehrung verweigert
   - Normaler Pfad (kein Fehler) setzt isolation_degraded=False
@@ -70,13 +70,13 @@ class TestSandboxResultField:
 class TestSandboxConfigField:
     """Prueft das neue allow_degraded_sandbox Feld."""
 
-    def test_default_true(self) -> None:
+    def test_default_false(self) -> None:
         config = SandboxConfig()
-        assert config.allow_degraded_sandbox is True
-
-    def test_can_set_false(self) -> None:
-        config = SandboxConfig(allow_degraded_sandbox=False)
         assert config.allow_degraded_sandbox is False
+
+    def test_explicit_legacy_override(self) -> None:
+        config = SandboxConfig(allow_degraded_sandbox=True)
+        assert config.allow_degraded_sandbox is True
 
 
 # ============================================================================

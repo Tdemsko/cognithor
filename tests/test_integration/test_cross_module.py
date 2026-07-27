@@ -592,8 +592,7 @@ class TestPGEToolExecution:
 
     @pytest.fixture()
     def pge_env(self, tmp_path: Path):
-        sandbox = tmp_path / "sandbox"
-        sandbox.mkdir()
+        sandbox = tmp_path / ".cognithor" / "workspace"
         config = CognithorConfig(
             cognithor_home=tmp_path / ".cognithor",
             security=SecurityConfig(
@@ -695,8 +694,8 @@ class TestPGEToolExecution:
         assert (sandbox / "info.txt").exists()
 
     @pytest.mark.asyncio
-    async def test_exec_command_classified_as_green(self, pge_env):
-        """exec_command is GREEN for autonomous operation."""
+    async def test_exec_command_requires_approval(self, pge_env):
+        """Host command execution remains approval-gated even with a sandbox configured."""
         config, _sandbox = pge_env
         gatekeeper = Gatekeeper(config)
         gatekeeper.initialize()
@@ -708,8 +707,8 @@ class TestPGEToolExecution:
         )
         session = SessionContext(user_id="alex", channel="cli")
         decision = gatekeeper.evaluate(action, session)
-        # exec_command is GREEN — sandbox protection still applies
-        assert decision.risk_level == RiskLevel.GREEN
+        assert decision.risk_level == RiskLevel.ORANGE
+        assert decision.status == GateStatus.APPROVE
 
 
 # =============================================================================

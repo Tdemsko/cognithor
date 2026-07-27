@@ -18,6 +18,7 @@ import asyncio
 import atexit
 import hashlib
 import json
+import os
 import re
 import weakref
 from datetime import UTC, datetime
@@ -42,6 +43,7 @@ from cognithor.models import (
     SessionContext,
     ToolCapability,
 )
+from cognithor.security.home_lab import max_risk, risk_floor, safe_mode_allows
 from cognithor.security.permission_scope import (
     SCOPE_REGISTRY,
     ScopeAxis,
@@ -67,13 +69,7 @@ log = get_logger(__name__)
 GREEN_TOOLS: frozenset[str] = frozenset(
     {
         "read_file",
-        "write_file",
-        "edit_file",
         "list_directory",
-        "exec_command",
-        "shell_exec",
-        "shell",
-        "run_python",
         "search_memory",
         "get_entity",
         "search",
@@ -160,7 +156,6 @@ GREEN_TOOLS: frozenset[str] = frozenset(
         "kanban_list_tasks",
         "social_scan",
         "social_leads",
-        "file_write",
         "canvas_eval",
         "canvas_push",
         "canvas_reset",
@@ -183,6 +178,9 @@ GREEN_TOOLS: frozenset[str] = frozenset(
 # future tool additions.
 YELLOW_TOOLS: frozenset[str] = frozenset(
     {
+        "write_file",
+        "edit_file",
+        "file_write",
         "save_to_memory",
         "add_entity",
         "add_relation",
@@ -244,6 +242,10 @@ YELLOW_TOOLS: frozenset[str] = frozenset(
 # confirmation before execution.
 ORANGE_TOOLS: frozenset[str] = frozenset(
     {
+        "exec_command",
+        "shell_exec",
+        "shell",
+        "run_python",
         "email_send",
         "calendar_create_event",
         "delete_file",
@@ -269,6 +271,9 @@ ORANGE_TOOLS: frozenset[str] = frozenset(
 # Module-level RED-tier tool set — destructive, irreversible deletes.
 RED_TOOLS: frozenset[str] = frozenset(
     {
+        "create_skill",
+        "install_community_skill",
+        "publish_skill",
         "vault_delete",
         "delete_entity",
         "delete_relation",
@@ -333,6 +338,9 @@ class Gatekeeper:
     ) -> None:
         """Initialisiert den Gatekeeper mit Security-Konfiguration und Policy-Regeln."""
         self._config = config
+        self._security_controls_required = bool(
+            getattr(config.security, "require_security_controls", False)
+        )
         # Tool group blocklists (derived from config.tools)
         self._disabled_tools: frozenset[str] = self._build_disabled_tools()
         self._audit_logger = audit_logger
@@ -365,7 +373,9 @@ class Gatekeeper:
             from cognithor.security.capabilities import CapabilityMatrix
 
             self._capability_matrix = CapabilityMatrix()
-        except Exception:
+        except Exception as exc:
+            if self._security_controls_required:
+                raise RuntimeError("Required security control failed: capability_matrix") from exc
             log.debug("gatekeeper_capability_matrix_init_failed", exc_info=True)
 
         # Pre-execution confidence checker
@@ -383,7 +393,9 @@ class Gatekeeper:
             from cognithor.skills.community.tool_enforcer import ToolEnforcer
 
             self._tool_enforcer = ToolEnforcer()
-        except Exception:
+        except Exception as exc:
+            if self._security_controls_required:
+                raise RuntimeError("Required security control failed: tool_enforcer") from exc
             log.debug("gatekeeper_tool_enforcer_init_failed", exc_info=True)
 
         # Trust-Resolver fuer Workspace-Vertrauen (Phase 2)
@@ -392,7 +404,9 @@ class Gatekeeper:
             from cognithor.security.trust_resolver import TrustResolver
 
             self._trust_resolver = TrustResolver.from_jarvis_config(config)
-        except Exception:
+        except Exception as exc:
+            if self._security_controls_required:
+                raise RuntimeError("Required security control failed: trust_resolver") from exc
             log.debug("gatekeeper_trust_resolver_init_failed", exc_info=True)
 
         # Aktiver Community-Skill (wird pro evaluate()-Aufruf gesetzt)
@@ -422,6 +436,16 @@ class Gatekeeper:
     def is_tool_disabled(self, tool_name: str) -> bool:
         """Check if a tool is disabled by config.tools flags."""
         return tool_name in self._disabled_tools
+
+    def _safe_mode_active(self) -> bool:
+        security = self._config.security
+        if not getattr(security, "safe_mode", False):
+            return False
+        env_name = getattr(security, "break_glass_env_var", "")
+        if env_name and os.environ.get(env_name) == "I_UNDERSTAND_THIS_BYPASSES_SAFE_MODE":
+            log.critical("local_break_glass_active", env_var=env_name)
+            return False
+        return True
 
     def reload_disabled_tools(self) -> None:
         """Re-read config.tools flags (called after runtime config change)."""
@@ -566,6 +590,22 @@ class Gatekeeper:
         if not self._initialized:
             self.initialize()
 
+        if self._safe_mode_active() and not safe_mode_allows(action.tool):
+            decision = GateDecision(
+                status=GateStatus.BLOCK,
+                reason=f"Global safe mode blocks non-read-only tool {action.tool!r}",
+                risk_level=RiskLevel.RED,
+                original_action=action,
+                policy_name="global_safe_mode",
+                explanation=DecisionExplanation(
+                    rule_id="global_safe_mode",
+                    rule_source="cognithor.security.home_lab:SAFE_MODE_READ_ONLY_TOOLS",
+                    matched_pattern=action.tool[:200],
+                ),
+            )
+            self._write_audit(action, decision, context)
+            return decision
+
         # --- Step -1: Community skill ToolEnforcer ---
         skill_block = self._enforce_skill_tools(action, context)
         if skill_block is not None:
@@ -686,9 +726,11 @@ class Gatekeeper:
         # --- Step 2: Explicit policy rules (highest priority first) ---
         for rule in self._policies:
             if self._matches_rule(action, rule):
-                risk = self._status_to_risk(rule.action)
+                policy_risk = self._status_to_risk(rule.action)
+                risk = self._apply_home_lab_risk_floor(action, policy_risk)
+                status = self._risk_to_status(risk) if risk != policy_risk else rule.action
                 decision = GateDecision(
-                    status=rule.action,
+                    status=status,
                     reason=rule.reason,
                     risk_level=risk,
                     original_action=action,
@@ -772,8 +814,25 @@ class Gatekeeper:
                         )
                         self._write_audit(action, decision, context)
                         return decision
-            except Exception:
-                pass  # Matrix-Fehler ignorieren, Fallback auf Default
+            except Exception as exc:
+                if self._security_controls_required:
+                    decision = GateDecision(
+                        status=GateStatus.BLOCK,
+                        reason=f"Required capability check failed: {type(exc).__name__}",
+                        risk_level=RiskLevel.RED,
+                        original_action=action,
+                        policy_name="capability_matrix_failure",
+                        explanation=DecisionExplanation(
+                            rule_id="capability_matrix_fail_closed",
+                            rule_source=(
+                                "cognithor.security.capabilities:CapabilityMatrix.get_violations"
+                            ),
+                            matched_pattern=action.tool[:200],
+                        ),
+                    )
+                    self._write_audit(action, decision, context)
+                    return decision
+                log.debug("capability_matrix_check_failed", exc_info=True)
 
         # --- Step 6: Default risk classification ---
         risk = self._classify_risk(action)
@@ -901,7 +960,21 @@ class Gatekeeper:
         if self._tool_enforcer is None or self._active_skill is None:
             return None
 
-        result = self._tool_enforcer.check(action, self._active_skill)
+        try:
+            result = self._tool_enforcer.check(action, self._active_skill)
+        except Exception as exc:
+            if not self._security_controls_required:
+                log.debug("community_tool_enforcer_check_failed", exc_info=True)
+                return None
+            decision = GateDecision(
+                status=GateStatus.BLOCK,
+                reason=f"Required community-tool enforcement failed: {type(exc).__name__}",
+                risk_level=RiskLevel.RED,
+                original_action=action,
+                policy_name="community_tool_enforcer_failure",
+            )
+            self._write_audit(action, decision, context)
+            return decision
         if not result.allowed:
             decision = GateDecision(
                 status=GateStatus.BLOCK,
@@ -949,20 +1022,20 @@ class Gatekeeper:
                     }
                     mapped = _level_map.get(annotated_level.lower())
                     if mapped is not None:
-                        return mapped
+                        return self._apply_home_lab_risk_floor(action, mapped)
 
         # Fallback: hardcoded tool lists
         # GREEN: Read-Only Operationen — see module-level GREEN_TOOLS.
         if tool in GREEN_TOOLS:
-            return RiskLevel.GREEN
+            return self._apply_home_lab_risk_floor(action, RiskLevel.GREEN)
 
         # YELLOW: write ops but non-dangerous — see module-level YELLOW_TOOLS.
         if tool in YELLOW_TOOLS:
-            return RiskLevel.YELLOW
+            return self._apply_home_lab_risk_floor(action, RiskLevel.YELLOW)
 
         # ORANGE: ops requiring user confirmation — see module-level ORANGE_TOOLS.
         if tool in ORANGE_TOOLS:
-            return RiskLevel.ORANGE
+            return self._apply_home_lab_risk_floor(action, RiskLevel.ORANGE)
 
         # RED: GDPR erasure tools — see module-level RED_TOOLS.
         if tool in RED_TOOLS:
@@ -971,7 +1044,7 @@ class Gatekeeper:
         # Genesis Anchor check (Identity Layer)
         if hasattr(self, "_identity_layer") and self._identity_layer is not None:
             try:
-                violated, reason = self._identity_layer.check_ethical_violation(
+                violated, _reason = self._identity_layer.check_ethical_violation(
                     {
                         "goal": action.rationale,
                         "steps": [{"tool": action.tool, "rationale": action.rationale}],
@@ -983,7 +1056,16 @@ class Gatekeeper:
                 log.debug("gatekeeper_ethical_check_failed", exc_info=True)
 
         # Unbekannte Tools → ORANGE (Fail-Safe: lieber nachfragen)
-        return RiskLevel.ORANGE
+        return self._apply_home_lab_risk_floor(action, RiskLevel.ORANGE)
+
+    def _apply_home_lab_risk_floor(
+        self,
+        action: PlannedAction,
+        classified: RiskLevel,
+    ) -> RiskLevel:
+        if not getattr(self._config.security, "home_lab_mode", False):
+            return classified
+        return max_risk(classified, risk_floor(action, self._config.workspace_dir))
 
     def _risk_to_status(self, risk: RiskLevel) -> GateStatus:
         """Konvertiert RiskLevel in GateStatus."""
@@ -1240,7 +1322,20 @@ class Gatekeeper:
                 )
         except SyntaxError:
             pass  # Unparseable code falls through to regex check
-        except Exception:
+        except Exception as exc:
+            if self._security_controls_required:
+                return GateDecision(
+                    status=GateStatus.BLOCK,
+                    reason=f"Required Python AST guard failed: {type(exc).__name__}",
+                    risk_level=RiskLevel.RED,
+                    original_action=action,
+                    policy_name="python_ast_guard_failure",
+                    explanation=DecisionExplanation(
+                        rule_id="python_ast_guard_fail_closed",
+                        rule_source="cognithor.security.python_ast_guard:analyse_python",
+                        matched_pattern=action.tool[:200],
+                    ),
+                )
             log.debug("python_ast_guard_failed", exc_info=True)
 
         # Layer 2: Regex fallback (catches patterns AST might miss in edge cases)
@@ -1367,6 +1462,8 @@ class Gatekeeper:
                     data = yaml.safe_load(f)
 
                 if not isinstance(data, dict) or "rules" not in data:
+                    if self._security_controls_required:
+                        raise RuntimeError(f"Required policy file is invalid: {policy_file}")
                     continue
 
                 for rule_data in data["rules"]:
@@ -1374,13 +1471,21 @@ class Gatekeeper:
                         rule = self._parse_rule(rule_data)
                         rules.append(rule)
                     except Exception as exc:
+                        if self._security_controls_required:
+                            raise RuntimeError(
+                                f"Required policy rule is invalid in {policy_file}"
+                            ) from exc
                         log.warning(
                             "invalid_policy_rule",
                             file=str(policy_file),
-                            rule=rule_data.get("name", "?"),
+                            rule=(
+                                rule_data.get("name", "?") if isinstance(rule_data, dict) else "?"
+                            ),
                             error=str(exc),
                         )
             except Exception as exc:
+                if self._security_controls_required:
+                    raise RuntimeError(f"Required policy loading failed: {policy_file}") from exc
                 log.error(
                     "policy_load_failed",
                     file=str(policy_file),

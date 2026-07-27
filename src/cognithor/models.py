@@ -387,7 +387,7 @@ class AuditEntry(BaseModel, frozen=True):
 class SandboxConfig(BaseModel):
     """Konfiguration der Ausfuehrungs-Sandbox. [B§3.3]"""
 
-    level: SandboxLevel = SandboxLevel.PROCESS
+    level: SandboxLevel = SandboxLevel.NAMESPACE
     timeout_seconds: int = Field(default=30, ge=1, le=600)
     max_memory_mb: int = Field(default=512, ge=64, le=8192)
     max_cpu_seconds: int = Field(default=10, ge=1, le=300)
@@ -399,7 +399,7 @@ class SandboxConfig(BaseModel):
         ]
     )
     network_access: bool = False
-    allow_degraded_sandbox: bool = True
+    allow_degraded_sandbox: bool = False
     env_vars: dict[str, str] = Field(default_factory=dict)
 
 

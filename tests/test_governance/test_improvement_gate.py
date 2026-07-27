@@ -18,7 +18,7 @@ from cognithor.governance.improvement_gate import (
 
 @pytest.fixture()
 def default_config():
-    return ImprovementGovernanceConfig()
+    return ImprovementGovernanceConfig(enabled=True)
 
 
 @pytest.fixture()
@@ -68,7 +68,7 @@ class TestImprovementGate:
         assert verdict == GateVerdict.COOLDOWN
 
     def test_cooldown_expires(self):
-        config = ImprovementGovernanceConfig(cooldown_minutes=5)
+        config = ImprovementGovernanceConfig(enabled=True, cooldown_minutes=5)
         gate = ImprovementGate(config)
 
         gate.record_outcome(ImprovementDomain.PROMPT_TUNING, success=False)
@@ -79,7 +79,7 @@ class TestImprovementGate:
         assert verdict == GateVerdict.ALLOWED
 
     def test_max_changes_per_hour_enforced(self):
-        config = ImprovementGovernanceConfig(max_changes_per_hour=2)
+        config = ImprovementGovernanceConfig(enabled=True, max_changes_per_hour=2)
         gate = ImprovementGate(config)
 
         gate.record_outcome(ImprovementDomain.PROMPT_TUNING, success=True)
@@ -106,15 +106,16 @@ class TestImprovementGate:
         gate.record_outcome(ImprovementDomain.PROMPT_TUNING, success=True)
         assert gate.check(ImprovementDomain.PROMPT_TUNING) == GateVerdict.ALLOWED
 
-    def test_disabled_gate_allows_everything(self):
+    def test_disabled_gate_blocks_self_improvement(self):
         config = ImprovementGovernanceConfig(enabled=False)
         gate = ImprovementGate(config)
 
-        assert gate.check(ImprovementDomain.CODE_GENERATION) == GateVerdict.ALLOWED
-        assert gate.check(ImprovementDomain.MODEL_SELECTION) == GateVerdict.ALLOWED
+        assert gate.check(ImprovementDomain.CODE_GENERATION) == GateVerdict.BLOCKED
+        assert gate.check(ImprovementDomain.MODEL_SELECTION) == GateVerdict.BLOCKED
 
     def test_custom_config_domains(self):
         config = ImprovementGovernanceConfig(
+            enabled=True,
             auto_domains=["code_generation"],
             blocked_domains=["prompt_tuning"],
         )
@@ -141,7 +142,7 @@ class TestGateIntegration:
     def test_governor_approve_checks_gate_allowed(self, tmp_path):
         from cognithor.governance.governor import GovernanceAgent
 
-        config = ImprovementGovernanceConfig()
+        config = ImprovementGovernanceConfig(enabled=True)
         gate = ImprovementGate(config)
         db = str(tmp_path / "gov.db")
         gov = GovernanceAgent(db_path=db, improvement_gate=gate)
@@ -164,6 +165,7 @@ class TestGateIntegration:
         from cognithor.governance.governor import GovernanceAgent
 
         config = ImprovementGovernanceConfig(
+            enabled=True,
             blocked_domains=["model_selection"],
         )
         gate = ImprovementGate(config)
@@ -184,7 +186,7 @@ class TestGateIntegration:
     def test_governor_approve_checks_gate_cooldown(self, tmp_path):
         from cognithor.governance.governor import GovernanceAgent
 
-        config = ImprovementGovernanceConfig()
+        config = ImprovementGovernanceConfig(enabled=True)
         gate = ImprovementGate(config)
         gate.record_outcome(ImprovementDomain.TOOL_PARAMETERS, success=False)
 
@@ -225,7 +227,7 @@ class TestGateIntegration:
         from cognithor.governance.governor import GovernanceAgent
 
         # MODEL_SELECTION is hitl by default, which maps to NEEDS_APPROVAL
-        config = ImprovementGovernanceConfig()
+        config = ImprovementGovernanceConfig(enabled=True)
         gate = ImprovementGate(config)
         db = str(tmp_path / "gov.db")
         gov = GovernanceAgent(db_path=db, improvement_gate=gate)

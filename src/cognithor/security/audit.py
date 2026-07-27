@@ -118,6 +118,7 @@ class AuditTrail:
         log_path: Path | str | None = None,
         hmac_key: bytes | None = None,
         ed25519_key: bytes | None = None,
+        verify_on_startup: bool = False,
     ) -> None:
         if log_path is not None:
             self._log_path = Path(log_path)
@@ -133,6 +134,11 @@ class AuditTrail:
 
         # Resume chain from the last entry
         self._restore_chain()
+        if verify_on_startup:
+            valid, total, broken_at = self.verify_chain()
+            if not valid:
+                raise RuntimeError(f"Audit chain integrity check failed at entry {broken_at}")
+            self._entry_count = total
 
     def _restore_chain(self) -> None:
         """Restores the last hash from the log."""
@@ -307,6 +313,19 @@ class AuditTrail:
                     expected = _compute_hash(data_str, prev_hash)
                     if stored_hash != expected:
                         return (False, i + 1, i)
+
+                    if self._hmac_key:
+                        stored_hmac = str(entry.get("hmac", ""))
+                        expected_hmac = hmac_mod.new(
+                            self._hmac_key,
+                            stored_hash.encode(),
+                            hashlib.sha256,
+                        ).hexdigest()
+                        if not stored_hmac or not hmac_mod.compare_digest(
+                            stored_hmac,
+                            expected_hmac,
+                        ):
+                            return (False, i + 1, i)
 
                     prev_hash = stored_hash
                     count += 1

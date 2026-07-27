@@ -1,9 +1,9 @@
 """Process Sandbox: Real isolation for shell commands.
 
-Three sandbox levels (automatic fallback):
+Three sandbox levels:
   1. bubblewrap (bwrap) -- Linux namespaces, no root required
   2. firejail -- Application sandboxing
-  3. bare -- No sandbox (only timeout + output limit)
+  3. bare -- Explicit local-administrator override only
 
 bubblewrap isolates:
   - Filesystem: Only workspace + /usr + /bin + /lib visible
@@ -132,7 +132,7 @@ class SandboxConfig:
     allowed_write_paths: list[str] = field(default_factory=list)
 
     # Network
-    network: NetworkPolicy = NetworkPolicy.ALLOW
+    network: NetworkPolicy = NetworkPolicy.BLOCK
 
     # Resource limits
     max_memory_mb: int = 512
@@ -140,6 +140,7 @@ class SandboxConfig:
     max_processes: int = 64
     default_timeout: int = 30
     max_cpu_seconds: int = 10
+    allow_bare_execution: bool = False
 
     # Environment variables to pass through
     env_passthrough: list[str] = field(
@@ -533,8 +534,8 @@ class WindowsJobObjectSandbox:
 class SandboxExecutor:
     """Fuehrt Befehle in der sichersten verfuegbaren Sandbox aus.
 
-    Automatisches Fallback:
-        bwrap → firejail → bare (kein Sandbox)
+    Secure selection:
+        bwrap → firejail → Windows Job Object → fail closed
 
     Usage:
         executor = SandboxExecutor(config)
@@ -594,11 +595,11 @@ class SandboxExecutor:
             return
 
         self._level = SandboxLevel.BARE
-        log.warning(
+        log.error(
             "no_sandbox_available",
             message=(
                 "Weder bwrap noch firejail noch Windows Job Objects "
-                "gefunden. Befehle laufen UNGESCHÜTZT!"
+                "gefunden. Befehlsausfuehrung wird verweigert."
             ),
             install_hint="apt install bubblewrap  # Empfohlen (Linux)",
         )
@@ -673,7 +674,12 @@ class SandboxExecutor:
                         eff_processes,
                     )
 
-                # Bare mode (no sandbox)
+                if not self._config.allow_bare_execution:
+                    return SandboxResult(
+                        error="Secure sandbox unavailable; execution refused",
+                        sandbox_level=SandboxLevel.BARE.value,
+                        exit_code=-1,
+                    )
                 return await self._exec_bare(command, cwd, timeout)
 
             finally:
@@ -743,7 +749,12 @@ class SandboxExecutor:
 
         except FileNotFoundError:
             log.error("sandbox_binary_not_found", level=level.value)
-            # Fallback auf bare
+            if not self._config.allow_bare_execution:
+                return SandboxResult(
+                    error=f"Sandbox binary disappeared ({level.value}); execution refused",
+                    sandbox_level=level.value,
+                    exit_code=-1,
+                )
             return await self._exec_bare(
                 full_args[-1] if full_args else "",
                 str(self._config.workspace_dir),
@@ -774,6 +785,12 @@ class SandboxExecutor:
             max_processes: Prozess-Limit.
         """
         if not self._jobobject:
+            if not self._config.allow_bare_execution:
+                return SandboxResult(
+                    error="Windows Job Object unavailable; execution refused",
+                    sandbox_level=SandboxLevel.JOBOBJECT.value,
+                    exit_code=-1,
+                )
             return await self._exec_bare(command, cwd, timeout)
 
         log.info(

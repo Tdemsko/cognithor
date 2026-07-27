@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -26,7 +27,6 @@ from cognithor.security.encrypted_db import (
 from cognithor.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    import sqlite3
     from pathlib import Path
 
     from cognithor.mcp.client import JarvisMCPClient
@@ -866,7 +866,10 @@ class ToolRegistryDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA_SQL)
         # Migration: add locked column to existing databases
-        with contextlib.suppress(_EncryptedOperationalError):
+        # ``encrypted_connect`` may return stdlib sqlite even when SQLCipher is
+        # installed (for example when encryption is explicitly disabled).
+        # Catch both backends so this idempotent migration stays idempotent.
+        with contextlib.suppress(_EncryptedOperationalError, sqlite3.OperationalError):
             self._conn.execute("ALTER TABLE tools ADD COLUMN locked INTEGER DEFAULT 1")
         self._conn.commit()
         log.debug("tool_registry_db_init", path=str(db_path))

@@ -109,7 +109,7 @@ class TestComputerScreenshotWithVision:
 class TestGatekeeperCUClassification:
     """Verify security classification hasn't regressed."""
 
-    def test_screenshot_green_actions_yellow(self):
+    def test_screenshot_green_actions_orange(self):
         from cognithor.config import CognithorConfig, ToolsConfig
         from cognithor.core.gatekeeper import Gatekeeper
         from cognithor.models import PlannedAction
@@ -121,10 +121,10 @@ class TestGatekeeperCUClassification:
         action = PlannedAction(tool="computer_screenshot", params={}, rationale="test")
         assert gk._classify_risk(action).name == "GREEN"
 
-        # Active actions are YELLOW (not GREEN!)
+        # Active actions require approval (ORANGE, not GREEN).
         for tool in ["computer_click", "computer_type", "computer_hotkey"]:
             action = PlannedAction(tool=tool, params={}, rationale="test")
-            assert gk._classify_risk(action).name == "YELLOW", f"{tool} must be YELLOW"
+            assert gk._classify_risk(action).name == "ORANGE", f"{tool} must be ORANGE"
 
 
 class TestGatewayCUDetection:

@@ -236,8 +236,15 @@ async def init_security(config: Any, llm_backend: Any = None) -> PhaseResult:
             log_dir=audit_log_dir,
             hmac_key=_hmac_key,
             ed25519_key=_ed25519_key,
+            verify_on_startup=getattr(
+                config.security,
+                "require_security_controls",
+                False,
+            ),
         )
-    except Exception:
+    except Exception as exc:
+        if getattr(config.security, "require_security_controls", False):
+            raise RuntimeError("Required security control failed: audit_trail") from exc
         log.debug("audit_trail_init_skipped", exc_info=True)
 
     # Runtime Monitor
@@ -272,7 +279,9 @@ async def init_security(config: Any, llm_backend: Any = None) -> PhaseResult:
         tool_enforcer = ToolEnforcer(max_tool_calls=max_calls)
         result["tool_enforcer"] = tool_enforcer
         log.info("community_tool_enforcer_initialized", max_tool_calls=max_calls)
-    except Exception:
+    except Exception as exc:
+        if getattr(config.security, "require_security_controls", False):
+            raise RuntimeError("Required security control failed: gateway_tool_enforcer") from exc
         log.debug("community_tool_enforcer_init_skipped", exc_info=True)
 
     return result

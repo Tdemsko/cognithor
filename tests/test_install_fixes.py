@@ -714,6 +714,9 @@ class TestSetESafety:
             echo "SURVIVED"
         """)
         r = _run_bash(script)
+        version = _run_bash('printf "%s" "${BASH_VERSINFO[0]}"')
+        if version.stdout == "3":
+            pytest.skip("Bash 3.2 does not apply errexit to this arithmetic command")
         assert r.returncode != 0, "((errors++)) must fail under set -e"
         assert "SURVIVED" not in r.stdout, "Script must die before echo"
 

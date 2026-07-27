@@ -55,8 +55,8 @@ class TestGatekeeperGenesisAnchors:
             or "harmful" in GENESIS_ANCHOR_CONTENTS[3].lower()
         )
 
-    def test_gatekeeper_identity_tools_green(self) -> None:
-        """Identity tools should be classified as GREEN."""
+    def test_gatekeeper_identity_tool_risk_floors(self) -> None:
+        """Read-only identity tools are GREEN; durable writes need approval."""
         import tempfile
 
         from cognithor.config import CognithorConfig
@@ -66,9 +66,11 @@ class TestGatekeeperGenesisAnchors:
         cfg = CognithorConfig(cognithor_home=tempfile.mkdtemp())
         gk = Gatekeeper(cfg)
 
-        for tool in ["identity_recall", "identity_state", "identity_reflect", "identity_dream"]:
+        for tool in ["identity_recall", "identity_state", "identity_reflect"]:
             action = PlannedAction(tool=tool, params={})
             assert gk._classify_risk(action) == RiskLevel.GREEN, f"{tool} should be GREEN"
+        dream = PlannedAction(tool="identity_dream", params={})
+        assert gk._classify_risk(dream) == RiskLevel.ORANGE
 
 
 class TestIdentityPhaseInit:

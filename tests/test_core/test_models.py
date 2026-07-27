@@ -324,9 +324,10 @@ class TestAuditEntry:
 class TestSandboxConfig:
     def test_defaults(self) -> None:
         s = SandboxConfig()
-        assert s.level == SandboxLevel.PROCESS
+        assert s.level == SandboxLevel.NAMESPACE
         assert s.timeout_seconds == 30
         assert s.network_access is False
+        assert s.allow_degraded_sandbox is False
         assert len(s.allowed_paths) == 2
 
     def test_validation(self) -> None:

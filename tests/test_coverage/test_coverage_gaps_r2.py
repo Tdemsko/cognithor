@@ -293,7 +293,7 @@ rules:
         assert decision.status == GateStatus.ALLOW
 
     def test_invalid_policy_yaml(self, tmp_path: Path):
-        """Ungültige YAML wird übersprungen."""
+        """Required policy parsing fails closed."""
         from cognithor.core.gatekeeper import Gatekeeper
 
         config = CognithorConfig(cognithor_home=tmp_path / ".cognithor")
@@ -305,7 +305,8 @@ rules:
         bad_policy.write_text("not: a: valid: yaml: list:", encoding="utf-8")
 
         gk = Gatekeeper(config)
-        gk.initialize()  # Sollte nicht crashen
+        with pytest.raises(RuntimeError, match="Required policy loading failed"):
+            gk.initialize()
 
 
 class TestGatekeeperEvaluate:
