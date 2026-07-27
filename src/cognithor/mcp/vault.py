@@ -27,6 +27,10 @@ import yaml
 
 from cognithor.i18n import t
 from cognithor.mcp.vault_backend import slugify as _ext_slugify
+from cognithor.memory.trust import (
+    DEFAULT_PROJECT_ID,
+    get_active_project_id,
+)
 from cognithor.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -71,6 +75,16 @@ class VaultTools:
     Backend is selected based on config.vault.encrypt_files.
     Auto-migration runs on mode change.
     """
+
+    @staticmethod
+    def _project_scope_denial() -> str | None:
+        project = get_active_project_id()
+        if project == DEFAULT_PROJECT_ID:
+            return None
+        return (
+            f"Vault access denied for project {project!r}: the legacy vault "
+            "is not project-scoped. Use project memory instead."
+        )
 
     def __init__(self, config: CognithorConfig | None = None) -> None:
         vault_cfg = getattr(config, "vault", None)
@@ -371,6 +385,8 @@ class VaultTools:
         linked_notes: str = "",
     ) -> str:
         """Erstellt eine neue Notiz im Vault."""
+        if denial := self._project_scope_denial():
+            return denial
         if not title.strip():
             return t("vault.error_no_title")
         if not content.strip():
@@ -403,6 +419,8 @@ class VaultTools:
         limit: int = 10,
     ) -> str:
         """Durchsucht das Vault nach Notizen."""
+        if denial := self._project_scope_denial():
+            return denial
         if not query.strip():
             return t("vault.error_no_query")
 
@@ -431,6 +449,8 @@ class VaultTools:
         limit: int = 20,
     ) -> str:
         """Listet Notizen im Vault auf."""
+        if denial := self._project_scope_denial():
+            return denial
         notes = self._backend.list_notes(
             folder=folder,
             tags=tags,
@@ -455,6 +475,8 @@ class VaultTools:
 
     async def vault_read(self, identifier: str) -> str:
         """Liest eine einzelne Notiz aus dem Vault."""
+        if denial := self._project_scope_denial():
+            return denial
         if not identifier.strip():
             return t("vault.error_no_identifier")
 
@@ -486,6 +508,8 @@ class VaultTools:
         add_tags: str = "",
     ) -> str:
         """Aktualisiert eine bestehende Notiz."""
+        if denial := self._project_scope_denial():
+            return denial
         if not identifier.strip():
             return t("vault.error_no_identifier")
 
@@ -509,6 +533,8 @@ class VaultTools:
         target_note: str,
     ) -> str:
         """Erstellt eine bidirektionale Verknuepfung zwischen zwei Notizen."""
+        if denial := self._project_scope_denial():
+            return denial
         src = self._backend.find_note(source_note)
         tgt = self._backend.find_note(target_note)
 
@@ -523,6 +549,8 @@ class VaultTools:
 
     async def vault_delete(self, path: str) -> str:
         """Loescht eine Notiz aus dem Vault (GDPR erasure)."""
+        if denial := self._project_scope_denial():
+            return denial
         if not path.strip():
             return t("vault.error_no_path")
 

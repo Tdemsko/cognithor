@@ -16,8 +16,8 @@ def test_computer_use_tools_importable():
 def test_computer_use_gatekeeper_classification():
     """Computer use tools should NOT be RED when computer_use_enabled=True.
 
-    Security model: screenshot is GREEN (read-only), action tools are YELLOW
-    (user-opted-in but still require approval gate).  All tools become RED
+    Security model: screenshot is GREEN (read-only), action tools are ORANGE
+    (user-opted-in and require explicit approval). All tools become RED
     when computer_use_enabled=False.
     """
     from cognithor.config import CognithorConfig, ToolsConfig
@@ -29,11 +29,11 @@ def test_computer_use_gatekeeper_classification():
 
     # Screenshot is read-only → GREEN
     ss_action = PlannedAction(tool="computer_screenshot", params={}, rationale="test")
-    assert gk_enabled._classify_risk(ss_action).value == "green", (
-        "computer_screenshot should be green"
+    assert gk_enabled._classify_risk(ss_action).value == "orange", (
+        "host computer_screenshot should require approval"
     )
 
-    # Active desktop actions → YELLOW (not RED, not GREEN)
+    # Active desktop actions → ORANGE (not RED, not GREEN)
     for tool in [
         "computer_click",
         "computer_type",
@@ -42,8 +42,8 @@ def test_computer_use_gatekeeper_classification():
         "computer_drag",
     ]:
         action = PlannedAction(tool=tool, params={}, rationale="test")
-        assert gk_enabled._classify_risk(action).value == "yellow", (
-            f"{tool} should be yellow when enabled, got {gk_enabled._classify_risk(action)}"
+        assert gk_enabled._classify_risk(action).value == "orange", (
+            f"{tool} should be orange when enabled, got {gk_enabled._classify_risk(action)}"
         )
         # Disabled → RED
         assert gk_disabled._classify_risk(action).value == "red", (

@@ -27,7 +27,13 @@ from cognithor.security.cicd_gate import (
 from cognithor.security.code_audit import (
     CodeAuditor,
 )
-from cognithor.security.credentials import CredentialStore
+from cognithor.security.credentials import (
+    CredentialMappingError,
+    CredentialStore,
+    CredentialStoreError,
+    CredentialStoreIntegrityError,
+    CredentialStoreUnavailableError,
+)
 from cognithor.security.framework import (
     IncidentTracker,
     PostureScorer,
@@ -96,8 +102,12 @@ __all__ = [
     "CIIntegration",
     "CapabilityMatrix",
     "ContainerIsolation",
+    "CredentialMappingError",
     "CredentialScanner",
     "CredentialStore",
+    "CredentialStoreError",
+    "CredentialStoreIntegrityError",
+    "CredentialStoreUnavailableError",
     "DependencyScanner",
     "EncryptedVault",
     "IncidentTracker",

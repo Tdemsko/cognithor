@@ -91,6 +91,7 @@ class TestBrowserToolWithMocks:
     def _make_initialized_tool(self, tmp_path: Path) -> BrowserTool:
         tool = BrowserTool(workspace_dir=tmp_path)
         tool._initialized = True
+        tool._network_resolver = AsyncMock(return_value=["93.184.216.34"])
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com"
@@ -144,6 +145,7 @@ class TestBrowserToolWithMocks:
     async def test_navigate_error(self, tmp_path: Path) -> None:
         tool = self._make_initialized_tool(tmp_path)
         tool._page.goto = AsyncMock(side_effect=Exception("Network error"))
+        tool._network_resolver = AsyncMock(return_value=["93.184.216.34"])
 
         result = await tool.navigate("https://bad-url.xyz")
 

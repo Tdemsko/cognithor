@@ -87,8 +87,8 @@ class TestFileOperations:
         assert risk == RiskLevel.GREEN, f"read_file should be GREEN, got {risk}"
 
     @pytest.mark.asyncio
-    async def test_write_file_is_green(self):
-        """write_file should be GREEN for autonomous ops (inform, not block)."""
+    async def test_write_file_outside_workspace_requires_approval(self):
+        """Host writes outside the project workspace must require approval."""
         from cognithor.config import CognithorConfig
         from cognithor.core.gatekeeper import Gatekeeper
         from cognithor.models import PlannedAction, RiskLevel
@@ -102,7 +102,9 @@ class TestFileOperations:
             rationale="Write",
         )
         risk = gk._classify_risk(action)
-        assert risk == RiskLevel.GREEN, f"write_file should be GREEN for autonomous ops, got {risk}"
+        assert risk == RiskLevel.ORANGE, (
+            f"write_file outside the workspace should be ORANGE, got {risk}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +116,8 @@ class TestRemoteExecution:
     """Remote shell tools must require approval."""
 
     @pytest.mark.asyncio
-    async def test_remote_exec_is_orange(self):
-        """remote_exec must be ORANGE (requires user approval)."""
+    async def test_remote_exec_is_red(self):
+        """Raw remote shell execution is blocked from model-facing use."""
         from cognithor.config import CognithorConfig
         from cognithor.core.gatekeeper import Gatekeeper
         from cognithor.models import PlannedAction, RiskLevel
@@ -127,7 +129,7 @@ class TestRemoteExecution:
             tool="remote_exec", params={"host_name": "dev", "command": "ls"}, rationale="Remote ls"
         )
         risk = gk._classify_risk(action)
-        assert risk == RiskLevel.ORANGE, f"remote_exec should be ORANGE, got {risk}"
+        assert risk == RiskLevel.RED, f"remote_exec should be RED, got {risk}"
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +182,8 @@ class TestToolCoverage:
             assert risk == RiskLevel.GREEN, f"{tool} should be GREEN, got {risk}"
 
     @pytest.mark.asyncio
-    async def test_exec_command_is_green(self):
-        """exec_command should be GREEN for autonomous ops (not GREEN, not ORANGE)."""
+    async def test_exec_command_is_blocked(self):
+        """Arbitrary host command execution must not be model-facing."""
         from cognithor.config import CognithorConfig
         from cognithor.core.gatekeeper import Gatekeeper
         from cognithor.models import PlannedAction, RiskLevel
@@ -191,9 +193,7 @@ class TestToolCoverage:
 
         action = PlannedAction(tool="exec_command", params={"command": "ls"}, rationale="List")
         risk = gk._classify_risk(action)
-        assert risk == RiskLevel.GREEN, (
-            f"exec_command should be GREEN for autonomous ops, got {risk}"
-        )
+        assert risk == RiskLevel.RED, f"exec_command should be RED, got {risk}"
 
 
 # ---------------------------------------------------------------------------

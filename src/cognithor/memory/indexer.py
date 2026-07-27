@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from cognithor.db import SQLITE_BUSY_TIMEOUT_MS
+from cognithor.memory.trust import resolve_project_id, validate_chunk_provenance
 from cognithor.models import Chunk, Entity, MemoryTier, Relation
 from cognithor.security.encrypted_db import encrypted_connect
 
@@ -93,9 +94,8 @@ class MemoryIndex:
     def _init_schema(self) -> None:
         """Create all tables and indexes."""
         c = self.conn
-        c.executescript(
+        c.execute(
             """
-            -- Chunks (alle Memory-Tiers)
             CREATE TABLE IF NOT EXISTS chunks (
                 id TEXT PRIMARY KEY,
                 text TEXT NOT NULL,
@@ -107,9 +107,20 @@ class MemoryIndex:
                 timestamp REAL,
                 token_count INTEGER DEFAULT 0,
                 entities_json TEXT DEFAULT '[]',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                source_type TEXT NOT NULL DEFAULT 'legacy',
+                source_id TEXT NOT NULL DEFAULT '',
+                source_trust TEXT NOT NULL DEFAULT 'legacy_unscoped',
+                instruction_authority INTEGER NOT NULL DEFAULT 0,
+                provenance_hash TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL
-            );
-
+            )
+            """
+        )
+        migrated_chunks = self._ensure_chunk_trust_schema()
+        c.executescript(
+            """
+            -- Chunks (alle Memory-Tiers)
             CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_path);
             CREATE INDEX IF NOT EXISTS idx_chunks_tier ON chunks(memory_tier);
             CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);
@@ -159,7 +170,8 @@ class MemoryIndex:
                 source_file TEXT DEFAULT '',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
-                confidence REAL DEFAULT 1.0
+                confidence REAL DEFAULT 1.0,
+                project_id TEXT NOT NULL DEFAULT 'default'
             );
 
             CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
@@ -175,7 +187,8 @@ class MemoryIndex:
                 attributes_json TEXT DEFAULT '{}',
                 source_file TEXT DEFAULT '',
                 created_at REAL NOT NULL,
-                confidence REAL DEFAULT 1.0
+                confidence REAL DEFAULT 1.0,
+                project_id TEXT NOT NULL DEFAULT 'default'
             );
 
             CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relation_type);
@@ -183,6 +196,78 @@ class MemoryIndex:
             CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_entity);
         """
         )
+        self._ensure_graph_project_schema()
+        if migrated_chunks:
+            c.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+            c.commit()
+
+    def _ensure_graph_project_schema(self) -> None:
+        """Idempotently bind graph entities and relations to projects."""
+        for table in ("entities", "relations"):
+            columns = {
+                row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "project_id" not in columns:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'"
+                )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_entities_project_name
+            ON entities(project_id, name)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_relations_project_source
+            ON relations(project_id, source_entity)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_relations_project_target
+            ON relations(project_id, target_entity)
+            """
+        )
+        self.conn.commit()
+
+    def _ensure_chunk_trust_schema(self) -> bool:
+        """Idempotently migrate legacy indexes to the project/trust contract."""
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(chunks)").fetchall()}
+        additions = {
+            "project_id": "TEXT NOT NULL DEFAULT 'default'",
+            "source_type": "TEXT NOT NULL DEFAULT 'legacy'",
+            "source_id": "TEXT NOT NULL DEFAULT ''",
+            "source_trust": "TEXT NOT NULL DEFAULT 'legacy_unscoped'",
+            "instruction_authority": "INTEGER NOT NULL DEFAULT 0",
+            "provenance_hash": "TEXT NOT NULL DEFAULT ''",
+        }
+        migrated = False
+        for name, declaration in additions.items():
+            if name not in columns:
+                self.conn.execute(f"ALTER TABLE chunks ADD COLUMN {name} {declaration}")
+                migrated = True
+        self.conn.execute(
+            """
+            UPDATE chunks
+            SET source_id = source_path
+            WHERE source_id IS NULL OR source_id = ''
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chunks_project_source
+            ON chunks(project_id, source_path)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chunks_project_tier
+            ON chunks(project_id, memory_tier)
+            """
+        )
+        self.conn.commit()
+        return migrated
 
     # ── Chunk Operations ─────────────────────────────────────────
 
@@ -256,6 +341,16 @@ class MemoryIndex:
 
     def _upsert_chunk_impl(self, chunk: Chunk) -> None:
         """Internal: insert/update ohne Lock und ohne Commit (fuer Batch-Nutzung)."""
+        if chunk.instruction_authority:
+            raise ValueError("Durable memory chunks cannot carry instruction authority")
+        validate_chunk_provenance(chunk)
+        project = resolve_project_id(chunk.project_id)
+        existing = self.conn.execute(
+            "SELECT project_id FROM chunks WHERE id = ?",
+            (chunk.id,),
+        ).fetchone()
+        if existing is not None and existing["project_id"] != project:
+            raise ValueError("Chunk id is already owned by another project")
         now = datetime.now().timestamp()
         ts = chunk.timestamp.timestamp() if chunk.timestamp else None
 
@@ -263,8 +358,10 @@ class MemoryIndex:
             """
             INSERT INTO chunks (id, text, source_path, line_start, line_end,
                               content_hash, memory_tier, timestamp, token_count,
-                              entities_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              entities_json, project_id, source_type, source_id,
+                              source_trust, instruction_authority, provenance_hash,
+                              created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 text=excluded.text,
                 source_path=excluded.source_path,
@@ -274,7 +371,13 @@ class MemoryIndex:
                 memory_tier=excluded.memory_tier,
                 timestamp=excluded.timestamp,
                 token_count=excluded.token_count,
-                entities_json=excluded.entities_json
+                entities_json=excluded.entities_json,
+                project_id=excluded.project_id,
+                source_type=excluded.source_type,
+                source_id=excluded.source_id,
+                source_trust=excluded.source_trust,
+                instruction_authority=excluded.instruction_authority,
+                provenance_hash=excluded.provenance_hash
             """,
             (
                 chunk.id,
@@ -287,6 +390,12 @@ class MemoryIndex:
                 ts,
                 chunk.token_count,
                 json.dumps(chunk.entities),
+                project,
+                chunk.source_type,
+                chunk.source_id or chunk.source_path,
+                chunk.source_trust,
+                int(chunk.instruction_authority),
+                chunk.provenance_hash,
                 now,
             ),
         )
@@ -299,6 +408,9 @@ class MemoryIndex:
         now = datetime.now().timestamp()
         rows = []
         for c in chunks:
+            if c.instruction_authority:
+                raise ValueError("Durable memory chunks cannot carry instruction authority")
+            validate_chunk_provenance(c)
             ts = c.timestamp.timestamp() if c.timestamp else None
             rows.append(
                 (
@@ -312,45 +424,94 @@ class MemoryIndex:
                     ts,
                     c.token_count,
                     json.dumps(c.entities),
+                    resolve_project_id(c.project_id),
+                    c.source_type,
+                    c.source_id or c.source_path,
+                    c.source_trust,
+                    int(c.instruction_authority),
+                    c.provenance_hash,
                     now,
                 )
             )
 
         with self._write_lock:
+            for chunk in chunks:
+                existing = self.conn.execute(
+                    "SELECT project_id FROM chunks WHERE id = ?",
+                    (chunk.id,),
+                ).fetchone()
+                if existing is not None and existing["project_id"] != resolve_project_id(
+                    chunk.project_id
+                ):
+                    raise ValueError("Chunk id is already owned by another project")
             self.conn.executemany(
                 """
                 INSERT INTO chunks (id, text, source_path, line_start, line_end,
                                   content_hash, memory_tier, timestamp, token_count,
-                                  entities_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  entities_json, project_id, source_type, source_id,
+                                  source_trust, instruction_authority, provenance_hash,
+                                  created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     text=excluded.text,
+                    source_path=excluded.source_path,
+                    line_start=excluded.line_start,
+                    line_end=excluded.line_end,
                     content_hash=excluded.content_hash,
                     memory_tier=excluded.memory_tier,
                     timestamp=excluded.timestamp,
                     token_count=excluded.token_count,
-                    entities_json=excluded.entities_json
+                    entities_json=excluded.entities_json,
+                    project_id=excluded.project_id,
+                    source_type=excluded.source_type,
+                    source_id=excluded.source_id,
+                    source_trust=excluded.source_trust,
+                    instruction_authority=excluded.instruction_authority,
+                    provenance_hash=excluded.provenance_hash
                 """,
                 rows,
             )
             self.conn.commit()
         return len(rows)
 
-    def delete_chunks_by_source(self, source_path: str) -> int:
-        """Loescht alle Chunks einer Quelldatei. Returns Anzahl geloescht."""
+    def delete_chunks_by_source(
+        self,
+        source_path: str,
+        *,
+        project_id: str | None = None,
+    ) -> int:
+        """Delete one source only within the resolved project boundary."""
+        project = resolve_project_id(project_id)
         with self._write_lock:
-            cursor = self.conn.execute("DELETE FROM chunks WHERE source_path = ?", (source_path,))
+            cursor = self.conn.execute(
+                "DELETE FROM chunks WHERE source_path = ? AND project_id = ?",
+                (source_path, project),
+            )
             self.conn.commit()
             return cursor.rowcount
 
-    def get_chunk_by_id(self, chunk_id: str) -> Chunk | None:
-        """Laedt einen Chunk anhand seiner ID."""
-        row = self.conn.execute("SELECT * FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+    def get_chunk_by_id(
+        self,
+        chunk_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> Chunk | None:
+        """Load a chunk only inside the resolved project boundary."""
+        project = resolve_project_id(project_id)
+        row = self.conn.execute(
+            "SELECT * FROM chunks WHERE id = ? AND project_id = ?",
+            (chunk_id, project),
+        ).fetchone()
         if row is None:
             return None
         return self._row_to_chunk(row)
 
-    def get_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, Chunk]:
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: list[str],
+        *,
+        project_id: str | None = None,
+    ) -> dict[str, Chunk]:
         """Laedt mehrere Chunks anhand ihrer IDs in einem Batch.
 
         Nutzt SELECT ... WHERE id IN (...) statt einzelner Queries (N+1 vermeiden).
@@ -364,58 +525,130 @@ class MemoryIndex:
         """
         if not chunk_ids:
             return {}
+        project = resolve_project_id(project_id)
 
         result: dict[str, Chunk] = {}
         # SQLite hat ein Standard-Limit von 999 Parametern pro Query
-        batch_size = 999
+        batch_size = 998
 
         for i in range(0, len(chunk_ids), batch_size):
             batch = chunk_ids[i : i + batch_size]
             placeholders = ",".join("?" for _ in batch)
             rows = self.conn.execute(
-                f"SELECT * FROM chunks WHERE id IN ({placeholders})",
-                batch,
+                f"SELECT * FROM chunks WHERE id IN ({placeholders}) AND project_id = ?",
+                [*batch, project],
             ).fetchall()
             for row in rows:
                 result[row["id"]] = self._row_to_chunk(row)
 
         return result
 
-    def get_chunks_by_source(self, source_path: str) -> list[Chunk]:
-        """Alle Chunks einer Quelldatei."""
+    def get_chunks_by_source(
+        self,
+        source_path: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[Chunk]:
+        """Return one source only inside the resolved project boundary."""
+        project = resolve_project_id(project_id)
         rows = self.conn.execute(
-            "SELECT * FROM chunks WHERE source_path = ? ORDER BY line_start",
-            (source_path,),
+            """
+            SELECT * FROM chunks
+            WHERE source_path = ? AND project_id = ?
+            ORDER BY line_start
+            """,
+            (source_path, project),
         ).fetchall()
         return [self._row_to_chunk(r) for r in rows]
 
-    def get_chunk_ids_by_hash(self, content_hash: str) -> list[str]:
+    def get_chunk_ids_by_hash(
+        self,
+        content_hash: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[str]:
         """Chunk-IDs fuer einen Content-Hash (fuer inkrementelle Hash-Map-Updates)."""
+        project = resolve_project_id(project_id)
         rows = self.conn.execute(
-            "SELECT id FROM chunks WHERE content_hash = ?",
-            (content_hash,),
+            "SELECT id FROM chunks WHERE content_hash = ? AND project_id = ?",
+            (content_hash, project),
         ).fetchall()
         return [r["id"] for r in rows]
 
-    def get_all_content_hashes(self) -> set[str]:
+    def get_all_content_hashes(self, *, project_id: str | None = None) -> set[str]:
         """Alle content_hashes im Index (fuer Embedding-Cache)."""
-        rows = self.conn.execute("SELECT DISTINCT content_hash FROM chunks").fetchall()
+        project = resolve_project_id(project_id)
+        rows = self.conn.execute(
+            "SELECT DISTINCT content_hash FROM chunks WHERE project_id = ?",
+            (project,),
+        ).fetchall()
         return {r["content_hash"] for r in rows}
 
-    def count_chunks(self, tier: MemoryTier | None = None) -> int:
+    def count_chunks(
+        self,
+        tier: MemoryTier | None = None,
+        *,
+        project_id: str | None = None,
+    ) -> int:
         """Zaehlt Chunks, optional gefiltert nach Tier."""
+        project = resolve_project_id(project_id)
         if tier:
             row = self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM chunks WHERE memory_tier = ?",
-                (tier.value,),
+                """
+                SELECT COUNT(*) as cnt FROM chunks
+                WHERE memory_tier = ? AND project_id = ?
+                """,
+                (tier.value, project),
             ).fetchone()
         else:
-            row = self.conn.execute("SELECT COUNT(*) as cnt FROM chunks").fetchone()
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM chunks WHERE project_id = ?",
+                (project,),
+            ).fetchone()
         return row["cnt"] if row else 0
+
+    def list_chunks(
+        self,
+        *,
+        tier: MemoryTier | None = None,
+        project_id: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Chunk]:
+        """List recent chunks inside one project boundary.
+
+        This is intentionally not a global administrative iterator.  Model
+        tools use it for project-scoped episodic/procedural reads without
+        falling back to the legacy shared filesystem stores.
+        """
+        project = resolve_project_id(project_id)
+        conditions = ["project_id = ?"]
+        params: list[Any] = [project]
+        if tier is not None:
+            conditions.append("memory_tier = ?")
+            params.append(tier.value)
+        if since is not None:
+            conditions.append("COALESCE(timestamp, created_at) >= ?")
+            params.append(since.timestamp())
+        bounded_limit = max(1, min(limit, 1000))
+        params.append(bounded_limit)
+        rows = self.conn.execute(
+            "SELECT * FROM chunks "
+            f"WHERE {' AND '.join(conditions)} "
+            "ORDER BY COALESCE(timestamp, created_at) DESC, id ASC LIMIT ?",
+            params,
+        ).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
 
     # ── BM25 Search ──────────────────────────────────────────────
 
-    def search_bm25(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
+    def search_bm25(
+        self,
+        query: str,
+        top_k: int = 10,
+        *,
+        project_id: str | None = None,
+    ) -> list[tuple[str, float]]:
         """FTS5 BM25 Suche.
 
         Args:
@@ -428,6 +661,7 @@ class MemoryIndex:
         """
         if not query.strip():
             return []
+        project = resolve_project_id(project_id)
 
         # FTS5 Query: Woerter mit OR verbinden, Prefix-Match fuer deutsche Komposita
         # Sanitize: strip FTS5 operators/special chars to prevent query injection
@@ -447,11 +681,11 @@ class MemoryIndex:
                 SELECT c.id, rank
                 FROM chunks_fts fts
                 JOIN chunks c ON c.rowid = fts.rowid
-                WHERE chunks_fts MATCH ?
+                WHERE chunks_fts MATCH ? AND c.project_id = ?
                 ORDER BY rank
                 LIMIT ?
                 """,
-                (fts_query, top_k),
+                (fts_query, project, top_k),
             ).fetchall()
         except sqlite3.OperationalError:
             # Fallback bei ungueltiger FTS-Query
@@ -540,19 +774,27 @@ class MemoryIndex:
 
     def upsert_entity(self, entity: Entity) -> None:
         """Fuegt eine Entitaet ein oder aktualisiert sie. Thread-safe."""
+        project = resolve_project_id(entity.project_id or None)
         with self._write_lock:
+            existing = self.conn.execute(
+                "SELECT project_id FROM entities WHERE id = ?",
+                (entity.id,),
+            ).fetchone()
+            if existing is not None and existing["project_id"] != project:
+                raise ValueError("Entity id is already owned by another project")
             self.conn.execute(
                 """
                 INSERT INTO entities (id, type, name, attributes_json, source_file,
-                                    created_at, updated_at, confidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    created_at, updated_at, confidence, project_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     type=excluded.type,
                     name=excluded.name,
                     attributes_json=excluded.attributes_json,
                     source_file=excluded.source_file,
                     updated_at=excluded.updated_at,
-                    confidence=excluded.confidence
+                    confidence=excluded.confidence,
+                    project_id=excluded.project_id
                 """,
                 (
                     entity.id,
@@ -563,13 +805,23 @@ class MemoryIndex:
                     entity.created_at.timestamp(),
                     entity.updated_at.timestamp(),
                     entity.confidence,
+                    project,
                 ),
             )
             self.conn.commit()
 
-    def get_entity_by_id(self, entity_id: str) -> Entity | None:
+    def get_entity_by_id(
+        self,
+        entity_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> Entity | None:
         """Laedt eine Entitaet."""
-        row = self.conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        project = resolve_project_id(project_id)
+        row = self.conn.execute(
+            "SELECT * FROM entities WHERE id = ? AND project_id = ?",
+            (entity_id, project),
+        ).fetchone()
         if row is None:
             return None
         return self._row_to_entity(row)
@@ -578,10 +830,12 @@ class MemoryIndex:
         self,
         name: str | None = None,
         entity_type: str | None = None,
+        *,
+        project_id: str | None = None,
     ) -> list[Entity]:
         """Sucht Entitaeten nach Name und/oder Typ."""
-        conditions: list[str] = []
-        params: list[Any] = []
+        conditions: list[str] = ["project_id = ?"]
+        params: list[Any] = [resolve_project_id(project_id)]
 
         if name:
             # Escape LIKE wildcards to prevent injection
@@ -592,60 +846,104 @@ class MemoryIndex:
             conditions.append("type = ?")
             params.append(entity_type)
 
-        where = " AND ".join(conditions) if conditions else "1=1"
+        where = " AND ".join(conditions)
         rows = self.conn.execute(
             f"SELECT * FROM entities WHERE {where} ORDER BY name", params
         ).fetchall()
         return [self._row_to_entity(r) for r in rows]
 
-    def delete_entity(self, entity_id: str) -> bool:
+    def delete_entity(
+        self,
+        entity_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> bool:
         """Loescht eine Entitaet und ihre Relationen. Thread-safe."""
+        project = resolve_project_id(project_id)
         with self._write_lock:
             self.conn.execute(
-                "DELETE FROM relations WHERE source_entity = ? OR target_entity = ?",
-                (entity_id, entity_id),
+                """
+                DELETE FROM relations
+                WHERE project_id = ? AND (source_entity = ? OR target_entity = ?)
+                """,
+                (project, entity_id, entity_id),
             )
-            cursor = self.conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+            cursor = self.conn.execute(
+                "DELETE FROM entities WHERE id = ? AND project_id = ?",
+                (entity_id, project),
+            )
             self.conn.commit()
             return cursor.rowcount > 0
 
-    def count_entities(self) -> int:
+    def count_entities(self, *, project_id: str | None = None) -> int:
         """Zaehlt die Anzahl der Entitaeten im Index."""
-        row = self.conn.execute("SELECT COUNT(*) as cnt FROM entities").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM entities WHERE project_id = ?",
+            (resolve_project_id(project_id),),
+        ).fetchone()
         return row["cnt"] if row else 0
 
-    def update_entity_confidence(self, entity_id: str, new_confidence: float) -> bool:
+    def update_entity_confidence(
+        self,
+        entity_id: str,
+        new_confidence: float,
+        *,
+        project_id: str | None = None,
+    ) -> bool:
         """Update the confidence score of an entity. Returns True if found.
 
         Thread-safe: Geschuetzt ueber Write-Lock.
         """
         with self._write_lock:
             cur = self.conn.execute(
-                "UPDATE entities SET confidence = ?, updated_at = ? WHERE id = ?",
-                (new_confidence, datetime.now().timestamp(), entity_id),
+                """
+                UPDATE entities SET confidence = ?, updated_at = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (
+                    new_confidence,
+                    datetime.now().timestamp(),
+                    entity_id,
+                    resolve_project_id(project_id),
+                ),
             )
             self.conn.commit()
             return cur.rowcount > 0
 
-    def update_relation_confidence(self, relation_id: str, new_confidence: float) -> bool:
+    def update_relation_confidence(
+        self,
+        relation_id: str,
+        new_confidence: float,
+        *,
+        project_id: str | None = None,
+    ) -> bool:
         """Update the confidence score of a relation.
 
         Thread-safe: Geschuetzt ueber Write-Lock.
         """
         with self._write_lock:
             cur = self.conn.execute(
-                "UPDATE relations SET confidence = ? WHERE id = ?",
-                (new_confidence, relation_id),
+                """
+                UPDATE relations SET confidence = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (new_confidence, relation_id, resolve_project_id(project_id)),
             )
             self.conn.commit()
             return cur.rowcount > 0
 
-    def list_entities_for_decay(self, limit: int = 500) -> list[dict[str, Any]]:
+    def list_entities_for_decay(
+        self,
+        limit: int = 500,
+        *,
+        project_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return entities with their confidence and updated_at for decay processing."""
         rows = self.conn.execute(
             "SELECT id, confidence, updated_at FROM entities "
-            "WHERE confidence > 0.05 ORDER BY updated_at ASC LIMIT ?",
-            (limit,),
+            "WHERE project_id = ? AND confidence > 0.05 "
+            "ORDER BY updated_at ASC LIMIT ?",
+            (resolve_project_id(project_id), limit),
         ).fetchall()
         return [
             {"id": r["id"], "confidence": r["confidence"], "updated_at": r["updated_at"]}
@@ -656,16 +954,37 @@ class MemoryIndex:
 
     def upsert_relation(self, relation: Relation) -> None:
         """Fuegt eine Relation ein oder aktualisiert sie. Thread-safe."""
+        project = resolve_project_id(relation.project_id or None)
         with self._write_lock:
+            endpoints = self.conn.execute(
+                """
+                SELECT id FROM entities
+                WHERE project_id = ? AND id IN (?, ?)
+                """,
+                (project, relation.source_entity, relation.target_entity),
+            ).fetchall()
+            if {row["id"] for row in endpoints} != {
+                relation.source_entity,
+                relation.target_entity,
+            }:
+                raise ValueError("Relation endpoints must exist in the same project")
+            existing = self.conn.execute(
+                "SELECT project_id FROM relations WHERE id = ?",
+                (relation.id,),
+            ).fetchone()
+            if existing is not None and existing["project_id"] != project:
+                raise ValueError("Relation id is already owned by another project")
             self.conn.execute(
                 """
                 INSERT INTO relations (id, source_entity, relation_type, target_entity,
-                                     attributes_json, source_file, created_at, confidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                     attributes_json, source_file, created_at, confidence,
+                                     project_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     relation_type=excluded.relation_type,
                     attributes_json=excluded.attributes_json,
-                    confidence=excluded.confidence
+                    confidence=excluded.confidence,
+                    project_id=excluded.project_id
                 """,
                 (
                     relation.id,
@@ -676,6 +995,7 @@ class MemoryIndex:
                     relation.source_file,
                     relation.created_at.timestamp(),
                     relation.confidence,
+                    project,
                 ),
             )
             self.conn.commit()
@@ -684,26 +1004,59 @@ class MemoryIndex:
         self,
         entity_id: str,
         relation_type: str | None = None,
+        *,
+        project_id: str | None = None,
     ) -> list[Relation]:
         """Alle Relationen einer Entitaet (als Quelle oder Ziel)."""
+        project = resolve_project_id(project_id)
         if relation_type:
             rows = self.conn.execute(
                 """SELECT * FROM relations
-                   WHERE (source_entity = ? OR target_entity = ?)
+                   WHERE project_id = ?
+                   AND (source_entity = ? OR target_entity = ?)
                    AND relation_type = ?""",
-                (entity_id, entity_id, relation_type),
+                (project, entity_id, entity_id, relation_type),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM relations WHERE source_entity = ? OR target_entity = ?",
-                (entity_id, entity_id),
+                """
+                SELECT * FROM relations
+                WHERE project_id = ? AND (source_entity = ? OR target_entity = ?)
+                """,
+                (project, entity_id, entity_id),
             ).fetchall()
         return [self._row_to_relation(r) for r in rows]
+
+    def delete_relation(
+        self,
+        source_entity: str,
+        relation_type: str,
+        target_entity: str,
+        *,
+        project_id: str | None = None,
+    ) -> int:
+        """Delete one relation shape inside the active project only."""
+        project = resolve_project_id(project_id)
+        with self._write_lock:
+            cursor = self.conn.execute(
+                """
+                DELETE FROM relations
+                WHERE project_id = ?
+                  AND source_entity = ?
+                  AND relation_type = ?
+                  AND target_entity = ?
+                """,
+                (project, source_entity, relation_type, target_entity),
+            )
+            self.conn.commit()
+            return cursor.rowcount
 
     def graph_traverse(
         self,
         entity_id: str,
         max_depth: int = 2,
+        *,
+        project_id: str | None = None,
     ) -> list[Entity]:
         """Traversiert den Wissens-Graph ab einer Entitaet.
 
@@ -718,6 +1071,9 @@ class MemoryIndex:
         Returns:
             Alle erreichbaren Entitaeten (ohne Start-Entitaet).
         """
+        project = resolve_project_id(project_id)
+        if self.get_entity_by_id(entity_id, project_id=project) is None:
+            return []
         visited: set[str] = {entity_id}
         frontier: set[str] = {entity_id}
 
@@ -732,9 +1088,9 @@ class MemoryIndex:
                 placeholders = ",".join("?" * len(batch))
                 rows = self.conn.execute(
                     f"SELECT source_entity, target_entity FROM relations "
-                    f"WHERE source_entity IN ({placeholders}) "
-                    f"OR target_entity IN ({placeholders})",
-                    batch + batch,
+                    f"WHERE project_id = ? AND (source_entity IN ({placeholders}) "
+                    f"OR target_entity IN ({placeholders}))",
+                    [project, *batch, *batch],
                 ).fetchall()
                 for r in rows:
                     for neighbor in (r["source_entity"], r["target_entity"]):
@@ -755,20 +1111,25 @@ class MemoryIndex:
             batch = result_list[i : i + 900]
             placeholders = ",".join("?" * len(batch))
             rows = self.conn.execute(
-                f"SELECT * FROM entities WHERE id IN ({placeholders})",
-                batch,
+                f"SELECT * FROM entities WHERE project_id = ? AND id IN ({placeholders})",
+                [project, *batch],
             ).fetchall()
             entities.extend(self._row_to_entity(r) for r in rows)
         return entities
 
-    def count_relations(self) -> int:
+    def count_relations(self, *, project_id: str | None = None) -> int:
         """Zaehlt die Anzahl der Relationen im Index."""
-        row = self.conn.execute("SELECT COUNT(*) as cnt FROM relations").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM relations WHERE project_id = ?",
+            (resolve_project_id(project_id),),
+        ).fetchone()
         return row["cnt"] if row else 0
 
     def get_chunks_with_entity_overlap(
         self,
         entity_ids: set[str],
+        *,
+        project_id: str | None = None,
     ) -> list[tuple[str, list[str]]]:
         """Find chunks whose entities_json contains any of the given entity IDs.
 
@@ -783,12 +1144,13 @@ class MemoryIndex:
         """
         if not entity_ids:
             return []
+        project = resolve_project_id(project_id)
 
         # Build a WHERE clause using LIKE for each entity ID.
         # entities_json is a JSON array of strings, e.g. '["e1","e2"]'.
         # We use LIKE with the quoted entity ID to filter at the DB level.
         conditions = []
-        params: list[str] = []
+        params: list[str] = [project]
         for eid in entity_ids:
             # Escape LIKE wildcards in entity IDs
             escaped = eid.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -797,7 +1159,8 @@ class MemoryIndex:
 
         where_clause = " OR ".join(conditions)
         query = (
-            f"SELECT id, entities_json FROM chunks WHERE entities_json != '[]' AND ({where_clause})"
+            "SELECT id, entities_json FROM chunks "
+            f"WHERE project_id = ? AND entities_json != '[]' AND ({where_clause})"
         )
         rows = self.conn.execute(query, params).fetchall()
 
@@ -854,6 +1217,12 @@ class MemoryIndex:
             timestamp=ts,
             token_count=row["token_count"],
             entities=entities,
+            project_id=row["project_id"],
+            source_type=row["source_type"],
+            source_id=row["source_id"] or row["source_path"],
+            source_trust=row["source_trust"],
+            instruction_authority=bool(row["instruction_authority"]),
+            provenance_hash=row["provenance_hash"],
         )
 
     @staticmethod
@@ -869,6 +1238,7 @@ class MemoryIndex:
             created_at=datetime.fromtimestamp(row["created_at"]),
             updated_at=datetime.fromtimestamp(row["updated_at"]),
             confidence=row["confidence"],
+            project_id=row["project_id"],
         )
 
     @staticmethod
@@ -884,4 +1254,5 @@ class MemoryIndex:
             source_file=row["source_file"],
             created_at=datetime.fromtimestamp(row["created_at"]),
             confidence=row["confidence"],
+            project_id=row["project_id"],
         )

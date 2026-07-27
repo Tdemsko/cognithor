@@ -32,6 +32,9 @@ def config(tmp_path: Path) -> CognithorConfig:
         cognithor_home=tmp_path / ".cognithor",
         security=SecurityConfig(allowed_paths=[str(tmp_path)]),
     )
+    # Unit tests deliberately exercise the local process executor on hosts
+    # without bwrap/firejail. Production defaults remain fail-closed.
+    cfg.sandbox.allow_degraded_sandbox = True
     ensure_directory_structure(cfg)
     return cfg
 

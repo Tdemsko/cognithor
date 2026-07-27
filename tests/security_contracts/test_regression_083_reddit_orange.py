@@ -4,7 +4,8 @@ When Reddit tools were added in v0.83.0, they weren't added to any
 classification list, so they defaulted to ORANGE — blocking every
 Reddit operation with an approval prompt.
 
-Fixed in 0.84.0: reddit_scan/reddit_leads → GREEN, reddit_reply → YELLOW.
+Home-lab policy keeps read-only discovery GREEN but requires approval for
+the public side effect ``reddit_reply``.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from cognithor.core.gatekeeper import Gatekeeper
-from cognithor.models import RiskLevel
+from cognithor.models import GateStatus, RiskLevel
 
 from .conftest import make_action, make_session
 
@@ -61,17 +62,18 @@ def test_reddit_leads_is_green(gatekeeper, session):
 
 
 # ---------------------------------------------------------------------------
-# REG-083.3 — reddit_reply is YELLOW
+# REG-083.3 — reddit_reply requires approval
 # ---------------------------------------------------------------------------
 
 
-def test_reddit_reply_is_yellow(gatekeeper, session):
-    """reddit_reply must be YELLOW (write action, but user is informed)."""
+def test_reddit_reply_requires_approval(gatekeeper, session):
+    """Posting a public reply is an external side effect and requires approval."""
     action = make_action("reddit_reply")
     decision = gatekeeper.evaluate(action, session)
-    assert decision.risk_level == RiskLevel.YELLOW, (
-        f"REGRESSION: reddit_reply classified as {decision.risk_level}, expected YELLOW"
+    assert decision.risk_level == RiskLevel.ORANGE, (
+        f"REGRESSION: reddit_reply classified as {decision.risk_level}, expected ORANGE"
     )
+    assert decision.status == GateStatus.APPROVE
 
 
 # ---------------------------------------------------------------------------

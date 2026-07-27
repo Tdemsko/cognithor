@@ -147,14 +147,16 @@ class TestCredentialStore:
         assert result["query"] == "test"
 
     def test_inject_invalid_mapping(self, tmp_path):
-        from cognithor.security.credentials import CredentialStore
+        import pytest
+
+        from cognithor.security.credentials import CredentialMappingError, CredentialStore
 
         store = CredentialStore(
             store_path=tmp_path / "creds.enc",
             passphrase="test",
         )
-        result = store.inject_credentials({}, {"x": "invalid_no_colon"})
-        assert "x" not in result
+        with pytest.raises(CredentialMappingError):
+            store.inject_credentials({}, {"x": "invalid_no_colon"})
 
     def test_count_and_encrypted(self, tmp_path):
         from cognithor.security.credentials import CredentialStore
@@ -205,23 +207,18 @@ class TestCredentialStore:
         assert store.retrieve("nope", "nope") is None
 
     def test_no_passphrase_raises(self, tmp_path, monkeypatch):
-        from cognithor.security.credentials import CredentialStore
+        from cognithor.security.credentials import (
+            CredentialStore,
+            CredentialStoreUnavailableError,
+        )
 
         monkeypatch.delenv("COGNITHOR_CREDENTIAL_KEY", raising=False)
-        store = CredentialStore(
-            store_path=tmp_path / "creds.enc",
-            passphrase="",
-        )
-        # CredentialStore now auto-generates a passphrase via OS keyring when
-        # none is supplied.  If keyring succeeds the store works without
-        # raising; if keyring is unavailable, fernet is None and store() raises.
-        if store._fernet is None:
-            with pytest.raises(RuntimeError):
-                store.store("s", "k", "v")
-        else:
-            # Keyring provided a key — store should succeed
-            entry = store.store("s", "k", "v")
-            assert entry.service == "s"
+        monkeypatch.setattr(CredentialStore, "_try_keyring", staticmethod(lambda: ""))
+        with pytest.raises(CredentialStoreUnavailableError):
+            CredentialStore(
+                store_path=tmp_path / "creds.enc",
+                passphrase="",
+            )
 
 
 # ============================================================================
@@ -231,8 +228,8 @@ class TestCredentialStore:
 
 class TestSandboxMocked:
     @pytest.mark.asyncio
-    async def test_execute_docker_fallback_to_namespace(self):
-        """Docker not available -> falls back to namespace -> then process."""
+    async def test_execute_docker_refuses_implicit_downgrade(self):
+        """Unavailable container isolation must fail closed by default."""
         from cognithor.security.sandbox import Sandbox
 
         sandbox = Sandbox()
@@ -258,9 +255,13 @@ class TestSandboxMocked:
 
         from cognithor.models import SandboxLevel
 
-        await sandbox.execute("echo hello", level=SandboxLevel.CONTAINER)
-        # Should have been downgraded
-        sandbox._exec_process.assert_awaited()
+        result = await sandbox.execute("echo hello", level=SandboxLevel.CONTAINER)
+
+        sandbox._exec_process.assert_not_awaited()
+        assert result.exit_code == -1
+        assert result.sandbox_level == SandboxLevel.CONTAINER
+        assert result.isolation_degraded is True
+        assert "unavailable" in result.stderr
 
     @pytest.mark.asyncio
     async def test_build_env(self):
@@ -632,7 +633,7 @@ class TestAudit:
         from cognithor.security.audit import AuditTrail
 
         trail = AuditTrail(log_dir=tmp_path)
-        valid, total, broken = trail.verify_chain()
+        valid, total, _broken = trail.verify_chain()
         assert valid is True
         assert total == 0
 
@@ -922,10 +923,10 @@ class TestCICDGate:
 
 
 class TestAgentVault:
-    def test_agent_vault_manager_create_and_get(self):
+    def test_agent_vault_manager_create_and_get(self, tmp_path):
         from cognithor.security.agent_vault import AgentVaultManager
 
-        mgr = AgentVaultManager()
+        mgr = AgentVaultManager(master_secret_path=str(tmp_path / "vault_master.key"))
         vault = mgr.create_vault("agent1")
         assert vault is not None
         assert mgr.get_vault("agent1") is vault
@@ -995,20 +996,20 @@ class TestAgentVault:
         assert s["total_secrets"] == 1
         assert s["active"] == 1
 
-    def test_manager_destroy_vault(self):
+    def test_manager_destroy_vault(self, tmp_path):
         from cognithor.security.agent_vault import AgentVaultManager
 
-        mgr = AgentVaultManager()
+        mgr = AgentVaultManager(master_secret_path=str(tmp_path / "vault_master.key"))
         vault = mgr.create_vault("agent1")
         vault.store("k1", "v1")
         assert mgr.destroy_vault("agent1") is True
         assert mgr.get_vault("agent1") is None
         assert mgr.destroy_vault("agent1") is False
 
-    def test_manager_stats(self):
+    def test_manager_stats(self, tmp_path):
         from cognithor.security.agent_vault import AgentVaultManager
 
-        mgr = AgentVaultManager()
+        mgr = AgentVaultManager(master_secret_path=str(tmp_path / "vault_master.key"))
         mgr.create_vault("a1")
         s = mgr.stats()
         assert s["total_vaults"] == 1

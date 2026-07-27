@@ -61,6 +61,7 @@ def _bare_gateway(
     gw._channels = {}
     gw._cost_tracker = None
     gw._run_recorder = None
+    gw._audit_trail = None
     gw._explainability = None
     gw._kanban_engine = None
     gw._correction_memory = None
@@ -148,6 +149,19 @@ def _approve_decision(action: PlannedAction | None = None) -> GateDecision:
         reason="needs approval",
         risk_level=RiskLevel.ORANGE,
         original_action=action,
+    )
+
+
+def _approved_decision(action: PlannedAction | None = None) -> GateDecision:
+    return GateDecision(
+        status=GateStatus.ALLOW,
+        reason="exact payload approved",
+        risk_level=RiskLevel.ORANGE,
+        original_action=action,
+        policy_name="homelab:R4:exact_approval",
+        action_risk_class="R4",
+        approval_id="apr_test_receipt",
+        approved_payload_hash="a" * 64,
     )
 
 
@@ -469,6 +483,107 @@ class TestRunPgeLoopGatekeeper:
 
 class TestRunPgeLoopExecution:
     @pytest.mark.asyncio
+    async def test_approved_action_is_audited_before_execution(self) -> None:
+        step = _step("send_email", to="operator@example.test", body="approved")
+        plan = _plan(steps=[step])
+        planner = MagicMock()
+        planner.plan = AsyncMock(return_value=plan)
+        gatekeeper = MagicMock()
+        gatekeeper.evaluate_plan.return_value = [_approve_decision(step)]
+        call_order: list[str] = []
+        executor = MagicMock()
+
+        async def execute(*args: Any, **kwargs: Any) -> list[ToolResult]:
+            call_order.append("execute")
+            return [_ok_result("send_email")]
+
+        executor.execute = AsyncMock(side_effect=execute)
+        executor.set_status_callback = MagicMock()
+        executor.set_agent_context = MagicMock()
+        executor.clear_agent_context = MagicMock()
+        gateway = _bare_gateway(
+            planner=planner,
+            gatekeeper=gatekeeper,
+            executor=executor,
+        )
+        gateway._handle_approvals = AsyncMock(return_value=[_approved_decision(step)])
+        audit_trail = MagicMock()
+
+        def record(entry: Any) -> str:
+            call_order.append("audit")
+            return "audit-hash"
+
+        audit_trail.record.side_effect = record
+        gateway._audit_trail = audit_trail
+
+        _final, _results, _returned_plan, audit = await run_pge_loop(
+            gateway,
+            _msg(),
+            _session(),
+            WorkingMemory(),
+            {},
+            None,
+            None,
+            None,
+        )
+
+        assert call_order[:2] == ["audit", "execute"]
+        audit_trail.record.assert_called_once()
+        authoritative_entry = audit_trail.record.call_args.args[0]
+        assert authoritative_entry.event_type == "approval_resolution"
+        assert authoritative_entry.approval_id == "apr_test_receipt"
+        assert authoritative_entry.approved_payload_hash == "a" * 64
+        assert authoritative_entry.action_risk_class == "R4"
+        assert any(entry.event_type == "approval_resolution" for entry in audit)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("audit_mode", ["missing", "write_failure"])
+    async def test_required_approval_audit_failure_blocks_execution(
+        self,
+        audit_mode: str,
+    ) -> None:
+        step = _step("send_email", to="operator@example.test", body="approved")
+        plan = _plan(steps=[step])
+        planner = MagicMock()
+        planner.plan = AsyncMock(return_value=plan)
+        gatekeeper = MagicMock()
+        gatekeeper.evaluate_plan.return_value = [_approve_decision(step)]
+        executor = MagicMock()
+        executor.execute = AsyncMock()
+        executor.set_status_callback = MagicMock()
+        executor.set_agent_context = MagicMock()
+        executor.clear_agent_context = MagicMock()
+        gateway = _bare_gateway(
+            planner=planner,
+            gatekeeper=gatekeeper,
+            executor=executor,
+        )
+        gateway._config.security.require_security_controls = True
+        gateway._handle_approvals = AsyncMock(return_value=[_approved_decision(step)])
+        if audit_mode == "write_failure":
+            gateway._audit_trail = MagicMock()
+            gateway._audit_trail.record.side_effect = OSError("disk unavailable")
+
+        _final, results, _returned_plan, audit = await run_pge_loop(
+            gateway,
+            _msg(),
+            _session(),
+            WorkingMemory(),
+            {},
+            None,
+            None,
+            None,
+        )
+
+        executor.execute.assert_not_awaited()
+        assert results == []
+        resolution = next(entry for entry in audit if entry.event_type == "approval_resolution")
+        assert resolution.decision_status == GateStatus.BLOCK
+        assert resolution.user_override is False
+        assert resolution.error.startswith("audit_")
+        assert "approval_audit_failed" in resolution.policy_name
+
+    @pytest.mark.asyncio
     async def test_single_step_success_breaks_with_formulated_response(self) -> None:
         plan = _plan(steps=[_step("web_search")])
         planner = MagicMock()
@@ -702,6 +817,9 @@ class TestHandleApprovals:
         result = await handle_approvals(gw, steps, decisions, sess, "cli")
         assert result[0].status == GateStatus.ALLOW
         assert "user_approved" in result[0].policy_name
+        assert result[0].approval_id.startswith("apr_")
+        assert len(result[0].approved_payload_hash) == 64
+        assert result[0].action_risk_class == "R4"
 
     @pytest.mark.asyncio
     async def test_user_rejects_changes_status_to_block(self) -> None:
@@ -715,6 +833,106 @@ class TestHandleApprovals:
         result = await handle_approvals(gw, steps, decisions, sess, "cli")
         assert result[0].status == GateStatus.BLOCK
         assert "user_rejected" in result[0].policy_name
+
+    @pytest.mark.asyncio
+    async def test_approved_payload_mutation_while_waiting_fails_closed(self) -> None:
+        gw = _bare_gateway()
+        step = _step("send_email")
+
+        async def mutate_then_approve(**_kwargs: Any) -> bool:
+            step.params["to"] = "attacker@example.com"
+            return True
+
+        chan = MagicMock()
+        chan.request_approval = AsyncMock(side_effect=mutate_then_approve)
+        gw._channels = {"cli": chan}
+        result = await handle_approvals(
+            gw,
+            [step],
+            [_approve_decision(step)],
+            _session(),
+            "cli",
+        )
+        assert result[0].status == GateStatus.BLOCK
+        assert "approval_payload_changed" in result[0].policy_name
+
+    @pytest.mark.asyncio
+    async def test_approved_action_uses_deep_immutable_snapshot(self) -> None:
+        gw = _bare_gateway()
+        step = PlannedAction(
+            tool="send_email",
+            params={"to": "recipient@example.com", "headers": {"x-trace": "approved"}},
+        )
+        chan = MagicMock()
+        chan.request_approval = AsyncMock(return_value=True)
+        gw._channels = {"cli": chan}
+
+        result = await handle_approvals(
+            gw,
+            [step],
+            [_approve_decision(step)],
+            _session(),
+            "cli",
+        )
+        step.params["to"] = "attacker@example.com"
+        step.params["headers"]["x-trace"] = "mutated"
+
+        assert result[0].status == GateStatus.ALLOW
+        assert result[0].original_action is not step
+        assert result[0].original_action is not None
+        assert result[0].original_action.params == {
+            "to": "recipient@example.com",
+            "headers": {"x-trace": "approved"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_approval_channel_cannot_mutate_execution_snapshot(self) -> None:
+        gw = _bare_gateway()
+        step = PlannedAction(
+            tool="send_email",
+            params={"to": "recipient@example.com", "body": "approved"},
+        )
+
+        async def mutate_presented_action(**kwargs: Any) -> bool:
+            kwargs["action"].params["to"] = "attacker@example.com"
+            return True
+
+        chan = MagicMock()
+        chan.request_approval = AsyncMock(side_effect=mutate_presented_action)
+        gw._channels = {"cli": chan}
+
+        result = await handle_approvals(
+            gw,
+            [step],
+            [_approve_decision(step)],
+            _session(),
+            "cli",
+        )
+
+        assert result[0].status == GateStatus.BLOCK
+        assert "approval_payload_changed" in result[0].policy_name
+        assert result[0].original_action is not None
+        assert result[0].original_action.params["to"] == "recipient@example.com"
+
+    @pytest.mark.asyncio
+    async def test_approval_prompt_contains_exact_binding_receipt(self) -> None:
+        gw = _bare_gateway()
+        step = _step("send_email")
+        chan = MagicMock()
+        chan.request_approval = AsyncMock(return_value=False)
+        gw._channels = {"cli": chan}
+        await handle_approvals(
+            gw,
+            [step],
+            [_approve_decision(step)],
+            _session(),
+            "cli",
+        )
+        reason = chan.request_approval.call_args.kwargs["reason"]
+        assert "Approval ID: apr_" in reason
+        assert "Payload SHA-256:" in reason
+        assert "Risk class: R4" in reason
+        assert "Expires:" in reason
 
     @pytest.mark.asyncio
     async def test_request_approval_exception_treated_as_rejection(self) -> None:

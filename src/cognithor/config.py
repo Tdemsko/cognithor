@@ -663,7 +663,10 @@ class SkillLifecycleConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Enable skill lifecycle audits")
     audit_interval_hours: int = Field(default=24, ge=1, le=168, description="Hours between audits")
-    auto_repair: bool = Field(default=True, description="Automatically repair broken skills")
+    auto_repair: bool = Field(
+        default=False,
+        description="Automatically repair broken skills (disabled by home-lab baseline)",
+    )
     suggest_new: bool = Field(default=True, description="Suggest new skills based on usage gaps")
     prune_unused_days: int = Field(
         default=30, ge=7, le=365, description="Disable unused skills after N days"
@@ -859,7 +862,7 @@ class MarketplaceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
-        default=True,
+        default=False,
         description="Skill Marketplace aktivieren",
     )
     """Aktiviert oder deaktiviert den Marketplace. Wenn ``False``, werden
@@ -887,7 +890,7 @@ class MarketplaceConfig(BaseModel):
     Unsignierte Skills werden abgelehnt."""
 
     auto_seed: bool = Field(
-        default=True,
+        default=False,
         description="Marketplace beim ersten Start mit Built-in-Prozeduren fuellen",
     )
     """Wenn ``True`` und die Marketplace-DB leer ist, werden die
@@ -905,7 +908,7 @@ class CommunityMarketplaceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
-        default=True,
+        default=False,
         description="Community Marketplace aktivieren",
     )
     """Aktiviert oder deaktiviert den Community Marketplace."""
@@ -2023,6 +2026,49 @@ class SecurityConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    home_lab_mode: bool = Field(
+        default=True,
+        description="Apply Thomas AI deterministic home-lab risk floors.",
+    )
+    safe_mode: bool = Field(
+        default=False,
+        description="Block every action except the explicit read-only safe-mode allowlist.",
+    )
+    break_glass_env_var: str = Field(
+        default="COGNITHOR_LOCAL_BREAK_GLASS",
+        description=(
+            "Local administrator acknowledgement environment variable. A valid, "
+            "short-lived expiry and non-empty reason are also required."
+        ),
+    )
+    break_glass_max_ttl_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=3600,
+        description="Maximum future lifetime of a local safe-mode break-glass activation.",
+    )
+    require_security_controls: bool = Field(
+        default=True,
+        description="Refuse startup/runtime operation when a required security control fails.",
+    )
+    approval_ttl_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="Maximum lifetime of an exact-payload approval intent.",
+    )
+    allow_sandbox_network: bool = Field(
+        default=False,
+        description=(
+            "Permit generated-code sandboxes to request network access. Keep false until "
+            "a private-network-denying egress proxy is configured."
+        ),
+    )
+    shell_permission_mode: Literal["read_only", "workspace_write", "full_access"] = Field(
+        default="workspace_write",
+        description="Semantic shell validator mode.",
+    )
+
     # Maximale Agent-Loop Iterationen pro Anfrage
     max_iterations: int = Field(default=25, ge=1, le=50)
     # Allowed file paths (gatekeeper checks against these)
@@ -2040,6 +2086,7 @@ class SecurityConfig(BaseModel):
     # Regex patterns for destructive shell commands [B§3.2]
     blocked_commands: list[str] = Field(
         default_factory=lambda: [
+            r"^\s*sudo\b",
             r"rm\s+-rf\s+/",
             r"mkfs\b",
             r"dd\s+if=/dev",
@@ -2348,7 +2395,7 @@ class ImprovementGovernanceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True
+    enabled: bool = False
     auto_domains: list[str] = Field(
         default_factory=lambda: ["prompt_tuning", "tool_parameters", "workflow_order"],
     )
@@ -2379,7 +2426,7 @@ class GEPAConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True  # Opt-out (enabled by default)
+    enabled: bool = False
     evolution_interval_hours: int = Field(default=6, ge=1, le=168)
     min_traces_for_proposal: int = Field(default=10, ge=3, le=100)
     max_active_optimizations: int = Field(default=1, ge=1, le=3)
@@ -2473,7 +2520,7 @@ class KanbanConfig(BaseModel):
     ws_debounce_ms: int = Field(default=500, ge=100, le=2000)
     auto_create_from_chat: bool = True
     auto_create_from_cron: bool = True
-    auto_create_from_evolution: bool = True
+    auto_create_from_evolution: bool = False
     auto_create_from_agents: bool = True
     auto_verify_on_complete: bool = False
     cascade_cancel_subtasks: bool = True

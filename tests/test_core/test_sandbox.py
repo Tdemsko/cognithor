@@ -38,7 +38,9 @@ def config(workspace: Path) -> SandboxConfig:
     return SandboxConfig(
         workspace_dir=workspace,
         preferred_level=SandboxLevel.BARE,  # Tests laufen ohne bwrap/firejail
+        network=NetworkPolicy.ALLOW,
         default_timeout=10,
+        allow_bare_execution=True,
     )
 
 
@@ -95,7 +97,8 @@ class TestSandboxConfig:
     def test_defaults(self) -> None:
         cfg = SandboxConfig()
         assert cfg.preferred_level == SandboxLevel.BWRAP
-        assert cfg.network == NetworkPolicy.ALLOW
+        assert cfg.network == NetworkPolicy.BLOCK
+        assert cfg.allow_bare_execution is False
         assert cfg.max_memory_mb == 512
         assert cfg.default_timeout == 30
         if sys.platform != "win32":
@@ -122,13 +125,13 @@ class TestSandboxConfig:
 
 class TestBwrapSandbox:
     def test_build_command_basic(self, workspace: Path) -> None:
-        cfg = SandboxConfig(workspace_dir=workspace)
+        cfg = SandboxConfig(workspace_dir=workspace, network=NetworkPolicy.ALLOW)
         bwrap = BwrapSandbox(cfg)
         args = bwrap.build_command("echo hello", str(workspace))
 
         assert args[0] == "bwrap"
         assert "--unshare-all" in args
-        assert "--share-net" in args  # Default: Netzwerk erlaubt
+        assert "--share-net" in args  # Explicit network opt-in
         assert "--proc" in args
         assert "--dev" in args
         assert "--tmpfs" in args

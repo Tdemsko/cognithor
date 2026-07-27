@@ -101,6 +101,8 @@ async def init_pge(
 
     # Causal Analyzer (optional)
     try:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            raise RuntimeError("global causal learning disabled by home-lab security profile")
         from cognithor.learning.causal import CausalAnalyzer
 
         causal_analyzer = CausalAnalyzer()
@@ -122,6 +124,8 @@ async def init_pge(
     skill_generator = None
     gap_detector = None
     try:
+        if getattr(config.security, "home_lab_mode", False) is True:
+            raise RuntimeError("automatic skill generation disabled by home-lab security profile")
         from cognithor.skills.generator import SkillGenerator
 
         skills_dir = config.cognithor_home / "skills" / "generated"
@@ -247,7 +251,11 @@ async def init_pge(
         raise
 
     # Wire TacticalMemory into Executor (best-effort)
-    if result.get("executor") is not None and memory_manager is not None:
+    if (
+        result.get("executor") is not None
+        and memory_manager is not None
+        and getattr(config.security, "home_lab_mode", False) is not True
+    ):
         tactical = getattr(memory_manager, "tactical", None)
         if tactical is not None:
             try:

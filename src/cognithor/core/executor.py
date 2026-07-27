@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from cognithor.core.plan_graph import PlanGraph
 from cognithor.i18n import t
+from cognithor.memory.trust import set_active_project_id
 from cognithor.models import (
     ActionPlan,
     GateDecision,
@@ -150,8 +151,15 @@ class Executor:
             "investigate_project": 120,
             "investigate_org": 120,
         }
-        # Agent context tokens (for contextvar reset)
-        self._ctx_tokens: list[contextvars.Token[Any]] = []
+        # Agent context tokens are task-local.  Executor is shared across
+        # concurrent sessions, so an instance-level list would let one request
+        # clear another request's project/workspace context.
+        self._ctx_tokens_var: contextvars.ContextVar[tuple[contextvars.Token[Any], ...]] = (
+            contextvars.ContextVar(
+                f"executor_ctx_tokens_{id(self)}",
+                default=(),
+            )
+        )
         # Status callback (set by Gateway for progress feedback)
         self._status_callback: Any = None
         # Tactical Memory (wired by gateway after init)
@@ -175,7 +183,9 @@ class Executor:
                 security_extension_hook,
             )
 
-            self._tool_hook_runner = ToolHookRunner()
+            self._tool_hook_runner = ToolHookRunner(
+                fail_closed=bool(getattr(config.security, "require_security_controls", False))
+            )
             self._tool_hook_runner.register(
                 _HE.PRE_TOOL_USE, "secret_redacting", secret_redacting_hook
             )
@@ -183,8 +193,10 @@ class Executor:
                 _HE.PRE_TOOL_USE, "security_extension", security_extension_hook
             )
             self._tool_hook_runner.register(_HE.POST_TOOL_USE, "audit_logging", audit_logging_hook)
-        except Exception:
-            pass  # Hooks optional
+        except Exception as exc:
+            if getattr(config.security, "require_security_controls", False):
+                raise RuntimeError("Required security control failed: executor_tool_hooks") from exc
+            log.debug("executor_tool_hooks_init_failed", exc_info=True)
 
     def reload_config(self, config: CognithorConfig) -> None:
         """Update executor limits from new config (live reload).
@@ -229,6 +241,7 @@ class Executor:
         sandbox_overrides: dict[str, Any] | None = None,
         agent_name: str = "",
         session_id: str = "",
+        project_id: str = "default",
     ) -> None:
         """Set the agent context for the next execution.
 
@@ -241,15 +254,19 @@ class Executor:
                 (network, max_memory_mb, timeout, etc.)
             agent_name: Name of the active agent (for audit/monitor).
             session_id: Session ID for profiling/telemetry.
+            project_id: Deterministic memory/workspace boundary.
         """
         # Reset old tokens before setting new ones
         self.clear_agent_context()
-        self._ctx_tokens = [
-            _agent_workspace_var.set(workspace_dir),
-            _agent_sandbox_var.set(sandbox_overrides),
-            _agent_name_var.set(agent_name),
-            _session_id_var.set(session_id),
-        ]
+        self._ctx_tokens_var.set(
+            (
+                _agent_workspace_var.set(workspace_dir),
+                _agent_sandbox_var.set(sandbox_overrides),
+                _agent_name_var.set(agent_name),
+                _session_id_var.set(session_id),
+                set_active_project_id(project_id),
+            )
+        )
 
     def set_fact_question_context(self, is_fact: bool) -> None:
         """Mark the current request as a factual question.
@@ -257,14 +274,15 @@ class Executor:
         When True, ``cross_check=True`` is automatically injected into
         ``search_and_read`` calls so multiple sources are compared.
         """
-        self._ctx_tokens.append(_fact_question_var.set(is_fact))
+        tokens = self._ctx_tokens_var.get()
+        self._ctx_tokens_var.set((*tokens, _fact_question_var.set(is_fact)))
 
     def clear_agent_context(self) -> None:
         """Clear the agent context after execution."""
-        for token in self._ctx_tokens:
+        for token in reversed(self._ctx_tokens_var.get()):
             with contextlib.suppress(ValueError):
                 token.var.reset(token)
-        self._ctx_tokens = []
+        self._ctx_tokens_var.set(())
 
     async def execute(
         self,
@@ -375,7 +393,10 @@ class Executor:
                 content_length=len(result.content),
             )
 
-            if self._tactical_memory is not None:
+            if (
+                self._tactical_memory is not None
+                and getattr(self._config.security, "home_lab_mode", False) is not True
+            ):
                 with contextlib.suppress(Exception):
                     self._tactical_memory.record_outcome(
                         tool=action.tool,
@@ -527,8 +548,33 @@ class Executor:
                     error_type="SecurityBlock",
                 )
 
-        # Pre-Tool-Use Hooks
+        # Pre-Tool-Use Hooks.  In the home-lab profile these hooks are part
+        # of the execution security boundary; absence or runtime failure must
+        # block the action rather than silently bypassing the control.
+        security_controls_required = bool(
+            getattr(self._config.security, "require_security_controls", False)
+        )
         if self._tool_hook_runner:
+            if security_controls_required:
+                from cognithor.core.tool_hooks import HookEvent
+
+                required_pre_hooks = frozenset({"secret_redacting", "security_extension"})
+                registered_pre_hooks = self._tool_hook_runner.registered_names(
+                    HookEvent.PRE_TOOL_USE
+                )
+                if not required_pre_hooks.issubset(registered_pre_hooks):
+                    log.error(
+                        "executor_required_pre_tool_hooks_missing",
+                        missing=sorted(required_pre_hooks - registered_pre_hooks),
+                        tool=tool_name,
+                    )
+                    return ToolResult(
+                        tool_name=tool_name,
+                        content="Required pre-execution security controls are incomplete",
+                        is_error=True,
+                        duration_ms=0,
+                        error_type="SecurityControlFailure",
+                    )
             try:
                 _hr = self._tool_hook_runner.run_pre_tool_use(tool_name, params)
                 if _hr.denied:
@@ -541,8 +587,29 @@ class Executor:
                     )
                 if _hr.updated_input is not None:
                     params = _hr.updated_input
-            except Exception:
-                pass  # Hook-Fehler blockieren nicht
+            except Exception as exc:
+                log.error(
+                    "executor_pre_tool_security_control_failed",
+                    tool=tool_name,
+                    error_type=type(exc).__name__,
+                )
+                if security_controls_required:
+                    return ToolResult(
+                        tool_name=tool_name,
+                        content="Required pre-execution security control failed",
+                        is_error=True,
+                        duration_ms=0,
+                        error_type="SecurityControlFailure",
+                    )
+        elif security_controls_required:
+            log.error("executor_pre_tool_security_controls_missing", tool=tool_name)
+            return ToolResult(
+                tool_name=tool_name,
+                content="Required pre-execution security controls are unavailable",
+                is_error=True,
+                duration_ms=0,
+                error_type="SecurityControlFailure",
+            )
 
         # Tool-Loop-Detection: pruefen ob dieser Call eine Schleife waere
         if self._loop_detector:

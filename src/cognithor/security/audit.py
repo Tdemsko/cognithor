@@ -52,6 +52,23 @@ _CREDENTIAL_PATTERNS: list[re.Pattern[str]] = [
     ),
 ]
 
+_SENSITIVE_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "client_secret",
+    "cookie",
+    "credential",
+    "password",
+    "passwd",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "session_token",
+    "token",
+)
+
 
 def mask_credentials(text: str) -> str:
     """Masks credentials in a text.
@@ -65,6 +82,24 @@ def mask_credentials(text: str) -> str:
     for pattern in _CREDENTIAL_PATTERNS:
         result = pattern.sub(lambda m: m.group(1) + "***", result)
     return result
+
+
+def _redact_sensitive_value(value: Any, depth: int) -> Any:
+    """Fully redact a value under a credential-bearing key.
+
+    Container shapes are preserved for audit consumers, but every leaf is
+    replaced because an unrecognized token format is still a secret when the
+    owning field explicitly says so.
+    """
+    if depth > 10:
+        return "***REDACTED***"
+    if isinstance(value, dict):
+        return {key: _redact_sensitive_value(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive_value(item, depth + 1) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive_value(item, depth + 1) for item in value)
+    return "***REDACTED***"
 
 
 def mask_dict(data: dict[str, Any], depth: int = 0) -> dict[str, Any]:
@@ -81,7 +116,10 @@ def mask_dict(data: dict[str, Any], depth: int = 0) -> dict[str, Any]:
         return data
     result: dict[str, Any] = {}
     for key, value in data.items():
-        if isinstance(value, str):
+        lowered_key = key.lower()
+        if any(part in lowered_key for part in _SENSITIVE_KEY_PARTS):
+            result[key] = _redact_sensitive_value(value, depth)
+        elif isinstance(value, str):
             result[key] = mask_credentials(value)
         elif isinstance(value, dict):
             result[key] = mask_dict(value, depth + 1)
@@ -118,6 +156,7 @@ class AuditTrail:
         log_path: Path | str | None = None,
         hmac_key: bytes | None = None,
         ed25519_key: bytes | None = None,
+        verify_on_startup: bool = False,
     ) -> None:
         if log_path is not None:
             self._log_path = Path(log_path)
@@ -133,6 +172,11 @@ class AuditTrail:
 
         # Resume chain from the last entry
         self._restore_chain()
+        if verify_on_startup:
+            valid, total, broken_at = self.verify_chain()
+            if not valid:
+                raise RuntimeError(f"Audit chain integrity check failed at entry {broken_at}")
+            self._entry_count = total
 
     def _restore_chain(self) -> None:
         """Restores the last hash from the log."""
@@ -308,6 +352,19 @@ class AuditTrail:
                     if stored_hash != expected:
                         return (False, i + 1, i)
 
+                    if self._hmac_key:
+                        stored_hmac = str(entry.get("hmac", ""))
+                        expected_hmac = hmac_mod.new(
+                            self._hmac_key,
+                            stored_hash.encode(),
+                            hashlib.sha256,
+                        ).hexdigest()
+                        if not stored_hmac or not hmac_mod.compare_digest(
+                            stored_hmac,
+                            expected_hmac,
+                        ):
+                            return (False, i + 1, i)
+
                     prev_hash = stored_hash
                     count += 1
         except (json.JSONDecodeError, OSError):
@@ -450,7 +507,7 @@ class AuditTrail:
             "action_tool": entry.action_tool,
             "action_params_hash": entry.action_params_hash,
             "decision_status": entry.decision_status.value,
-            "decision_reason": entry.decision_reason,
+            "decision_reason": mask_credentials(entry.decision_reason),
             "risk_level": entry.risk_level.value,
             "policy_name": entry.policy_name,
             "user_override": entry.user_override,
@@ -460,5 +517,5 @@ class AuditTrail:
                 mask_credentials(entry.execution_result) if mask else entry.execution_result
             )
         if entry.error:
-            result["error"] = entry.error
+            result["error"] = mask_credentials(entry.error)
         return result

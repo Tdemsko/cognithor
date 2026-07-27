@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cognithor.security.credentials import CredentialStore
+from cognithor.security.credentials import (
+    CredentialMappingError,
+    CredentialStore,
+    CredentialStoreIntegrityError,
+    CredentialStoreUnavailableError,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,14 +31,6 @@ def store(store_path: Path) -> CredentialStore:
     return CredentialStore(
         store_path=store_path,
         passphrase="test_master_key_42",
-    )
-
-
-@pytest.fixture
-def empty_store(store_path: Path) -> CredentialStore:
-    return CredentialStore(
-        store_path=store_path,
-        passphrase="",
     )
 
 
@@ -140,12 +137,14 @@ class TestPersistence:
         store1.store("svc", "token", "secret")
 
         store2 = CredentialStore(store_path=store_path, passphrase="wrong")
-        # Should fail to decrypt (returns None)
-        result = store2.retrieve("svc", "token")
-        # With XOR fallback, wrong key gives garbage, not None
-        # But with Fernet it would return None
-        # We just verify it doesn't crash
-        assert isinstance(result, str | type(None))
+        with pytest.raises(CredentialStoreIntegrityError):
+            store2.retrieve("svc", "token")
+
+    def test_corrupt_store_fails_closed(self, store_path: Path):
+        store_path.write_text("{not-json", encoding="utf-8")
+        store = CredentialStore(store_path=store_path, passphrase="correct")
+        with pytest.raises(CredentialStoreIntegrityError):
+            _ = store.count
 
 
 class TestFilePermissions:
@@ -176,8 +175,14 @@ class TestInjectCredentials:
     def test_inject_missing_credential(self, store: CredentialStore):
         params = {"key": ""}
         mapping = {"key": "nonexistent:nope"}
-        result = store.inject_credentials(params, mapping)
-        assert result["key"] == ""  # Unchanged
+        with pytest.raises(CredentialMappingError):
+            store.inject_credentials(params, mapping)
+
+    def test_inject_missing_can_be_non_strict_for_legacy_callers(self, store: CredentialStore):
+        params = {"key": ""}
+        mapping = {"key": "nonexistent:nope"}
+        result = store.inject_credentials(params, mapping, strict=False)
+        assert result["key"] == ""
 
     def test_inject_multiple(self, store: CredentialStore):
         store.store("api", "key", "k1")
@@ -199,6 +204,25 @@ class TestInjectCredentials:
         assert original["key"] == "old"
         assert result["key"] == "val"
 
+    def test_scoped_injection_does_not_use_global_secret_by_default(self, store: CredentialStore):
+        store.store("svc", "key", "global-value")
+        with pytest.raises(CredentialMappingError):
+            store.inject_credentials(
+                {"key": ""},
+                {"key": "svc:key"},
+                agent_id="worker-capability",
+            )
+
+    def test_scoped_injection_requires_explicit_global_fallback(self, store: CredentialStore):
+        store.store("svc", "key", "global-value")
+        result = store.inject_credentials(
+            {"key": ""},
+            {"key": "svc:key"},
+            agent_id="worker-capability",
+            allow_global_fallback=True,
+        )
+        assert result["key"] == "global-value"
+
 
 class TestEncryptionStatus:
     def test_fernet_encryption(self, store: CredentialStore):
@@ -207,14 +231,9 @@ class TestEncryptionStatus:
         val = store.retrieve("svc", "key")
         assert val == "test_value"
 
-    def test_empty_passphrase_uses_keyring_fallback(self, empty_store: CredentialStore):
-        # Without explicit passphrase, CredentialStore auto-generates via keyring
-        # If keyring is available, store should work; if not, it stores unencrypted
-        try:
-            empty_store.store("svc", "key", "val")
-            # If we get here, keyring auto-generated a key — that's correct
-            val = empty_store.retrieve("svc", "key")
-            assert val == "val"
-        except RuntimeError:
-            # If cryptography is not installed, this is expected
-            pass
+    def test_empty_passphrase_fails_when_keyring_unavailable(
+        self, store_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(CredentialStore, "_try_keyring", staticmethod(lambda: ""))
+        with pytest.raises(CredentialStoreUnavailableError):
+            CredentialStore(store_path=store_path, passphrase="")

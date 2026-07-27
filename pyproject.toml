@@ -50,10 +50,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0,<9",
-    "pytest-asyncio>=0.24,<1",
+    "pytest>=9.0.3,<10",
+    "pytest-asyncio>=1.3,<2",
     "pytest-cov>=6.0,<7",
-    "pytest-httpx>=0.30",
+    "pytest-httpx>=0.36,<1",
     "hypothesis>=6.0,<7",
     "ruff>=0.9,<1",
     "mypy>=1.14,<2",
@@ -175,7 +175,10 @@ encryption = [
     "keyring>=25.0",
 ]
 identity = [
-    "chromadb>=1.5.0",
+    # ChromaDB 1.x is affected by CVE-2026-45829 / GHSA-f4j7-r4q5-qw2c
+    # with no patched 1.x release available as of the home-lab baseline.
+    # Stay on the last pre-1.0 line until upstream publishes a fixed build.
+    "chromadb>=0.6.3,<1",
     "sentence-transformers>=5.0.0",
     "numpy>=2.0,<3",
 ]

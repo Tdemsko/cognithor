@@ -46,6 +46,7 @@ from cognithor.core.gatekeeper import Gatekeeper
 from cognithor.core.planner import Planner
 from cognithor.gateway.gateway import Gateway
 from cognithor.models import IncomingMessage
+from cognithor.security.audit import AuditTrail
 
 # =============================================================================
 # Helpers
@@ -154,6 +155,11 @@ def gateway_with_mocks(tmp_path):
     gw._mcp_client = mock_mcp
     gw._ollama = mock_ollama
     gw._model_router = mock_router
+    gw._audit_trail = AuditTrail(
+        log_dir=tmp_path / ".cognithor" / "logs",
+        hmac_key=b"cognithor-e2e-test-audit-key",
+        verify_on_startup=True,
+    )
     gw._running = True
 
     return gw, mock_ollama, mock_mcp, tmp_path
@@ -230,9 +236,27 @@ def gateway_extended_tools(tmp_path):
     gw._mcp_client = mock_mcp
     gw._ollama = mock_ollama
     gw._model_router = mock_router
+    gw._audit_trail = AuditTrail(
+        log_dir=tmp_path / ".cognithor" / "logs",
+        hmac_key=b"cognithor-e2e-test-audit-key",
+        verify_on_startup=True,
+    )
     gw._running = True
 
     return gw, mock_ollama, mock_mcp, tmp_path
+
+
+def _install_explicit_approval_channel(gateway: Gateway, channel_name: str = "webui") -> None:
+    """Install a deterministic test channel that simulates explicit user approval.
+
+    Home-lab policy deliberately classifies durable writes and code execution as
+    approval-gated unless a dedicated disposable-worker contract proves otherwise.
+    Positive E2E execution tests use this helper so they exercise the approval
+    path instead of weakening the production risk floor.
+    """
+    channel = MagicMock()
+    channel.request_approval = AsyncMock(return_value=True)
+    gateway._channels[channel_name] = channel
 
 
 # =============================================================================
@@ -557,6 +581,7 @@ class TestCodeGeneration:
     async def test_code_with_error_triggers_replan(self, gateway_with_mocks):
         """First run_python fails -- LLM replans -- second run succeeds."""
         gw, mock_ollama, mock_mcp, _sandbox = gateway_with_mocks
+        _install_explicit_approval_channel(gw)
 
         call_count = 0
 
@@ -681,8 +706,9 @@ class TestMemoryOperations:
 
     @pytest.mark.asyncio
     async def test_save_to_memory(self, gateway_with_mocks):
-        """'Merk dir dass...' triggers save_to_memory."""
+        """An explicitly approved memory write triggers save_to_memory."""
         gw, mock_ollama, mock_mcp, _sandbox = gateway_with_mocks
+        _install_explicit_approval_channel(gw)
 
         call_count = 0
 
@@ -2104,6 +2130,7 @@ class TestShellCommands:
     async def test_python_code_uses_run_python(self, gateway_with_mocks):
         """Python scripts should use run_python, NOT exec_command."""
         gw, mock_ollama, mock_mcp, _ = gateway_with_mocks
+        _install_explicit_approval_channel(gw)
 
         call_count = 0
 
@@ -2761,7 +2788,7 @@ class TestSkillSystem:
 
     @pytest.mark.asyncio
     async def test_create_skill_request(self, gateway_extended_tools):
-        """'Erstelle einen Skill fuer...' triggers create_skill tool."""
+        """Self-modifying skill creation is blocked from direct model execution."""
         gw, mock_ollama, mock_mcp, _ = gateway_extended_tools
 
         call_count = 0
@@ -2800,7 +2827,8 @@ class TestSkillSystem:
         response = await gw.handle_message(msg)
 
         assert response.text
-        assert mock_mcp.call_tool.called
+        mock_mcp.call_tool.assert_not_called()
+        assert "blocked" in response.text.lower() or "blockiert" in response.text.lower()
 
     @pytest.mark.asyncio
     async def test_skill_listing_not_from_memory(self, gateway_extended_tools):
@@ -3508,8 +3536,9 @@ class TestMultiToolCoordination:
 
     @pytest.mark.asyncio
     async def test_search_save_memory_chain(self, gateway_with_mocks):
-        """Search web then save results to memory."""
+        """Search and an explicitly approved durable memory write both execute."""
         gw, mock_ollama, mock_mcp, _ = gateway_with_mocks
+        _install_explicit_approval_channel(gw)
 
         call_count = 0
 

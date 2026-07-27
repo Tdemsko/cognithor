@@ -44,7 +44,11 @@ from cognithor.models import (
 
 @pytest.fixture()
 def config(tmp_path) -> CognithorConfig:
-    return CognithorConfig(cognithor_home=tmp_path)
+    config = CognithorConfig(cognithor_home=tmp_path)
+    # This module verifies the upstream legacy reflection implementation.
+    # Home-lab fail-closed behavior has dedicated security-contract tests.
+    config.security.home_lab_mode = False
+    return config
 
 
 @pytest.fixture()

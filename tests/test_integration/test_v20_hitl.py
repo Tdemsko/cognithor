@@ -518,8 +518,9 @@ class TestApprovalManager:
 
         task = await mgr.wait_for_resolution(req.request_id, timeout=0.1)
         assert task is not None
-        assert task.request.status == ApprovalStatus.APPROVED
+        assert task.request.status == ApprovalStatus.TIMED_OUT
 
+    @pytest.mark.asyncio
     @pytest.mark.asyncio
     async def test_wait_timeout_auto_reject(self):
         mgr = ApprovalManager()

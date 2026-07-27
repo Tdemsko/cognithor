@@ -19,6 +19,7 @@ import pytest
 
 from cognithor.config import CognithorConfig, SecurityConfig, ensure_directory_structure
 from cognithor.mcp.shell import ShellTools, register_shell_tools
+from cognithor.models import SandboxConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,6 +67,7 @@ def config(tmp_path: Path) -> CognithorConfig:
         security=SecurityConfig(
             allowed_paths=[str(tmp_path)],
         ),
+        sandbox=SandboxConfig(allow_degraded_sandbox=True),
     )
     ensure_directory_structure(cfg)
     return cfg
@@ -232,7 +234,7 @@ class TestOutputDecoding:
     def test_decode_utf8(self) -> None:
         from cognithor.core.sandbox import SandboxExecutor
 
-        stdout, stderr, truncated = SandboxExecutor._decode_and_truncate(
+        stdout, _stderr, _truncated = SandboxExecutor._decode_and_truncate(
             "Ärzte und Über".encode(), b""
         )
         assert "Ärzte" in stdout
@@ -240,7 +242,7 @@ class TestOutputDecoding:
     def test_decode_empty(self) -> None:
         from cognithor.core.sandbox import SandboxExecutor
 
-        stdout, stderr, truncated = SandboxExecutor._decode_and_truncate(b"", b"")
+        stdout, stderr, _truncated = SandboxExecutor._decode_and_truncate(b"", b"")
         assert stdout == ""
         assert stderr == ""
 
@@ -249,7 +251,7 @@ class TestOutputDecoding:
 
         # 0x80 ist kein gültiges UTF-8
         data = b"Hello \x80 World"
-        stdout, stderr, truncated = SandboxExecutor._decode_and_truncate(data, b"")
+        stdout, _stderr, _truncated = SandboxExecutor._decode_and_truncate(data, b"")
         assert "Hello" in stdout
         assert "World" in stdout
 

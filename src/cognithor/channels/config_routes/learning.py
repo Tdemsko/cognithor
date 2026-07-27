@@ -32,6 +32,7 @@ except ImportError:
 if TYPE_CHECKING:
     from cognithor.channels.config_routes._protocols import RoutableApp
 
+from cognithor.memory.trust import resolve_project_id
 from cognithor.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -492,6 +493,15 @@ def _register_ingest_routes(
     def _get_ingest() -> Any:
         return getattr(gateway, "_knowledge_ingest", None) if gateway else None
 
+    def _resolve_ingest_project(raw_value: Any) -> str:
+        value = str(raw_value or "").strip()
+        config = getattr(gateway, "_config", None)
+        security = getattr(config, "security", None)
+        home_lab = getattr(security, "home_lab_mode", False) is True
+        if home_lab and not value:
+            raise ValueError("project_id is required by the home-lab security profile")
+        return resolve_project_id(value or None)
+
     # -- File upload --------------------------------------------------------
 
     @app.post("/api/v1/learn/file", dependencies=deps)
@@ -523,7 +533,13 @@ def _register_ingest_routes(
             from cognithor.learning.knowledge_ingest import Priority
 
             priority = Priority.from_string(priority_str)
-            result = await svc.ingest_file(filename, file_bytes, priority=priority)
+            project_id = _resolve_ingest_project(form.get("project_id"))
+            result = await svc.ingest_file(
+                filename,
+                file_bytes,
+                priority=priority,
+                project_id=project_id,
+            )
 
             return {
                 "id": result.id,
@@ -536,7 +552,10 @@ def _register_ingest_routes(
                 "text_length": result.text_length,
                 "error": result.error,
                 "created_at": result.created_at.isoformat(),
+                "project_id": result.project_id,
             }
+        except ValueError as exc:
+            return {"error": str(exc), "code": "INVALID_PROJECT"}
         except Exception as exc:
             log.error("learn_file_error", error=str(exc))
             return {"error": "File ingestion failed", "code": "INTERNAL_ERROR"}
@@ -563,7 +582,12 @@ def _register_ingest_routes(
             from cognithor.learning.knowledge_ingest import Priority
 
             priority = Priority.from_string(priority_str)
-            result = await svc.ingest_url(url, priority=priority)
+            project_id = _resolve_ingest_project(body.get("project_id"))
+            result = await svc.ingest_url(
+                url,
+                priority=priority,
+                project_id=project_id,
+            )
 
             return {
                 "id": result.id,
@@ -576,7 +600,10 @@ def _register_ingest_routes(
                 "text_length": result.text_length,
                 "error": result.error,
                 "created_at": result.created_at.isoformat(),
+                "project_id": result.project_id,
             }
+        except ValueError as exc:
+            return {"error": str(exc), "code": "INVALID_PROJECT"}
         except Exception as exc:
             log.error("learn_url_error", error=str(exc))
             return {"error": "URL ingestion failed", "code": "INTERNAL_ERROR"}
@@ -603,7 +630,12 @@ def _register_ingest_routes(
             from cognithor.learning.knowledge_ingest import Priority
 
             priority = Priority.from_string(priority_str)
-            result = await svc.ingest_youtube(url, priority=priority)
+            project_id = _resolve_ingest_project(body.get("project_id"))
+            result = await svc.ingest_youtube(
+                url,
+                priority=priority,
+                project_id=project_id,
+            )
 
             return {
                 "id": result.id,
@@ -616,7 +648,10 @@ def _register_ingest_routes(
                 "text_length": result.text_length,
                 "error": result.error,
                 "created_at": result.created_at.isoformat(),
+                "project_id": result.project_id,
             }
+        except ValueError as exc:
+            return {"error": str(exc), "code": "INVALID_PROJECT"}
         except Exception as exc:
             log.error("learn_youtube_error", error=str(exc))
             return {"error": "YouTube ingestion failed", "code": "INTERNAL_ERROR"}
@@ -624,12 +659,17 @@ def _register_ingest_routes(
     # -- Queue status -------------------------------------------------------
 
     @app.get("/api/v1/learn/queue", dependencies=deps)
-    async def learn_queue() -> dict[str, Any]:
+    async def learn_queue(request: Request) -> dict[str, Any]:
         """Show pending deep-learn tasks."""
         svc = _get_ingest()
         if not svc:
             return {"error": "Knowledge ingest service not initialized", "status": 503}
-        return {"queue": svc._queue.pending(), "size": len(svc._queue)}
+        try:
+            project_id = _resolve_ingest_project(request.query_params.get("project_id"))
+        except ValueError as exc:
+            return {"error": str(exc), "code": "INVALID_PROJECT"}
+        queue = svc._queue.pending(project_id=project_id)
+        return {"queue": queue, "size": len(queue), "project_id": project_id}
 
     # -- History & Stats ----------------------------------------------------
 
@@ -641,7 +681,11 @@ def _register_ingest_routes(
             return {"error": "Knowledge ingest service not initialized", "status": 503}
 
         limit = int(request.query_params.get("limit", "50"))
-        results = svc.results
+        try:
+            project_id = _resolve_ingest_project(request.query_params.get("project_id"))
+        except ValueError as exc:
+            return {"error": str(exc), "code": "INVALID_PROJECT"}
+        results = svc.results_for_project(project_id)
         # Return most recent first
         recent = list(reversed(results))[:limit]
 
@@ -656,18 +700,26 @@ def _register_ingest_routes(
                     "text_length": r.text_length,
                     "error": r.error,
                     "created_at": r.created_at.isoformat(),
+                    "project_id": r.project_id,
                 }
                 for r in recent
             ],
             "count": len(results),
-            "stats": svc.stats(),
+            "stats": svc.stats(project_id=project_id),
+            "project_id": project_id,
         }
 
     @app.get("/api/v1/learn/stats", dependencies=deps)
-    async def learn_stats() -> dict[str, Any]:
+    async def learn_stats(request: Request) -> dict[str, Any]:
         """Return ingestion statistics."""
         svc = _get_ingest()
         if not svc:
             return {"error": "Knowledge ingest service not initialized", "status": 503}
 
-        return cast("dict[str, Any]", svc.stats())
+        try:
+            project_id = _resolve_ingest_project(request.query_params.get("project_id"))
+        except ValueError as exc:
+            return {"error": str(exc), "code": "INVALID_PROJECT"}
+        result = cast("dict[str, Any]", svc.stats(project_id=project_id))
+        result["project_id"] = project_id
+        return result

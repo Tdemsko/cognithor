@@ -200,7 +200,7 @@ class TestDefaultConfig:
 
     @pytest.mark.asyncio
     async def test_default_timeout_from_config(self):
-        sb = Sandbox(SandboxConfig(timeout_seconds=5))
+        sb = Sandbox(SandboxConfig(level=SandboxLevel.PROCESS, timeout_seconds=5))
         result = await sb.execute("echo ok")
         assert result.exit_code == 0
 
@@ -212,7 +212,7 @@ class TestDefaultConfig:
 
     @pytest.mark.asyncio
     async def test_network_default_from_config(self):
-        sb = Sandbox(SandboxConfig(network_access=True))
+        sb = Sandbox(SandboxConfig(level=SandboxLevel.PROCESS, network_access=True))
         # Sollte nicht crashen — network-Flag wird durchgereicht
         result = await sb.execute("echo ok")
         assert result.exit_code == 0
@@ -256,37 +256,40 @@ class TestBuildEnv:
 
 class TestNamespaceFallback:
     @pytest.mark.asyncio
-    async def test_namespace_falls_back_to_process_without_bwrap(self):
+    async def test_namespace_refuses_without_bwrap(self):
         sb = Sandbox(SandboxConfig(level=SandboxLevel.NAMESPACE))
-        # bwrap ist in der Testumgebung typischerweise nicht da
         if not sb.capabilities.get("bwrap"):
             result = await sb._exec_namespace("echo fallback_test")
-            assert result.exit_code == 0
-            assert "fallback_test" in result.stdout
+            assert result.exit_code == -1
+            assert result.isolation_degraded is True
+            assert "refused" in result.stderr
 
     @pytest.mark.asyncio
-    async def test_namespace_with_network_flag(self):
+    async def test_namespace_network_flag_does_not_bypass_refusal(self):
         sb = Sandbox(SandboxConfig(level=SandboxLevel.NAMESPACE))
         if not sb.capabilities.get("bwrap"):
             result = await sb._exec_namespace("echo net", network=True)
-            assert result.exit_code == 0
+            assert result.exit_code == -1
+            assert result.isolation_degraded is True
 
 
 class TestDockerFallback:
     @pytest.mark.asyncio
-    async def test_docker_falls_back_without_docker(self):
+    async def test_docker_refuses_without_docker(self):
         sb = Sandbox(SandboxConfig(level=SandboxLevel.CONTAINER))
         if not sb.capabilities.get("docker"):
             result = await sb._exec_docker("echo docker_fallback")
-            assert result.exit_code == 0
-            assert "docker_fallback" in result.stdout
+            assert result.exit_code == -1
+            assert result.isolation_degraded is True
+            assert "refused" in result.stderr
 
     @pytest.mark.asyncio
-    async def test_docker_with_network_flag(self):
+    async def test_docker_network_flag_does_not_bypass_refusal(self):
         sb = Sandbox(SandboxConfig(level=SandboxLevel.CONTAINER))
         if not sb.capabilities.get("docker"):
             result = await sb._exec_docker("echo net", network=True)
-            assert result.exit_code == 0
+            assert result.exit_code == -1
+            assert result.isolation_degraded is True
 
 
 # ============================================================================

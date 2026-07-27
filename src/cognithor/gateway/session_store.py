@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from cognithor.db import SQLITE_BUSY_TIMEOUT_MS
+from cognithor.memory.trust import validate_project_id
 from cognithor.models import (
     Message,
     MessageRole,
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     max_iterations INTEGER DEFAULT 10,
     title         TEXT DEFAULT '',
     folder        TEXT DEFAULT '',
+    project_id    TEXT NOT NULL DEFAULT 'default',
     incognito     INTEGER DEFAULT 0
 );
 
@@ -93,6 +95,8 @@ _MIGRATIONS = [
     "ALTER TABLE sessions ADD COLUMN conversation_id TEXT DEFAULT '';",
     # Migration 8: active_leaf_id for ConversationTree link
     "ALTER TABLE sessions ADD COLUMN active_leaf_id TEXT DEFAULT '';",
+    # Migration 9: durable retrieval/workspace security boundary
+    "ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';",
 ]
 
 
@@ -153,6 +157,13 @@ class SessionStore:
                     self._conn.commit()
                 except Exception:
                     pass  # Spalte/Index existiert bereits (sqlite3 or sqlcipher3)
+            session_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "project_id" not in session_columns:
+                raise RuntimeError(
+                    "Required sessions.project_id security migration did not complete"
+                )
         return self._conn
 
     def save_session(self, session: SessionContext) -> None:
@@ -160,20 +171,22 @@ class SessionStore:
         agent_id = getattr(session, "agent_name", "jarvis") or "jarvis"
         conversation_id = getattr(session, "conversation_id", "") or ""
         active_leaf_id = getattr(session, "active_leaf_id", "") or ""
+        project_id = validate_project_id(getattr(session, "project_id", "default"))
         self.conn.execute(
             """
             INSERT INTO sessions
                 (session_id, user_id, channel, agent_id, started_at,
                  last_activity, message_count, active, max_iterations, incognito,
-                 conversation_id, active_leaf_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 conversation_id, active_leaf_id, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 last_activity=excluded.last_activity,
                 message_count=excluded.message_count,
                 active=excluded.active,
                 incognito=excluded.incognito,
                 conversation_id=excluded.conversation_id,
-                active_leaf_id=excluded.active_leaf_id
+                active_leaf_id=excluded.active_leaf_id,
+                project_id=excluded.project_id
             """,
             (
                 session.session_id,
@@ -188,6 +201,7 @@ class SessionStore:
                 int(getattr(session, "incognito", False)),
                 conversation_id,
                 active_leaf_id,
+                project_id,
             ),
         )
         self.conn.commit()
@@ -217,6 +231,7 @@ class SessionStore:
             user_id=row["user_id"],
             channel=row["channel"],
             agent_name=agent_id,
+            project_id=validate_project_id(row["project_id"]),
             started_at=_from_ts(row["started_at"]),
             last_activity=_from_ts(row["last_activity"]),
             message_count=row["message_count"],
@@ -249,6 +264,7 @@ class SessionStore:
             user_id=row["user_id"],
             channel=row["channel"],
             agent_name=agent_id,
+            project_id=validate_project_id(row["project_id"]),
             started_at=_from_ts(row["started_at"]),
             last_activity=_from_ts(row["last_activity"]),
             message_count=row["message_count"],
@@ -514,6 +530,16 @@ class SessionStore:
         cursor = self.conn.execute(
             "UPDATE sessions SET folder = ? WHERE session_id = ?",
             (folder, session_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def update_session_project(self, session_id: str, project_id: str) -> bool:
+        """Persist the deterministic project scope for one session."""
+        project = validate_project_id(project_id)
+        cursor = self.conn.execute(
+            "UPDATE sessions SET project_id = ? WHERE session_id = ?",
+            (project, session_id),
         )
         self.conn.commit()
         return cursor.rowcount > 0

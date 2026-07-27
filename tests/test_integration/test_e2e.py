@@ -423,9 +423,10 @@ class TestE2EDestructiveBlocked:
 
 class TestE2EMultiStep:
     @pytest.mark.asyncio
-    async def test_write_then_read(self, config: CognithorConfig, sandbox: Path) -> None:
+    async def test_write_then_read(self, config: CognithorConfig) -> None:
         """Plan mit 2 Schritten: Datei schreiben, dann lesen."""
-        target_file = str(sandbox / "multi.txt")
+        target = config.workspace_dir / "multi.txt"
+        target_file = str(target)
         call_count = 0
 
         async def mock_chat(**kwargs):
@@ -465,8 +466,8 @@ class TestE2EMultiStep:
 
         assert response.is_final
         # Datei muss tatsächlich existieren (echte MCP-Tools!)
-        assert (sandbox / "multi.txt").exists()
-        assert (sandbox / "multi.txt").read_text() == "Multi-Step-Test bestanden!"
+        assert target.exists()
+        assert target.read_text() == "Multi-Step-Test bestanden!"
 
 
 # =============================================================================

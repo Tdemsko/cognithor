@@ -234,6 +234,7 @@ async def handle_message(
                     msg.text,
                     wm,
                     channel_kind=msg.channel,
+                    project_id=session.project_id,
                 )
                 if not ctx_result.skipped:
                     log.info(
@@ -697,11 +698,25 @@ async def resolve_agent_route(
         agent_name = route_decision.agent.name
 
     session = gw._get_or_create_session(msg.channel, msg.user_id, agent_name)
+    from cognithor.memory.trust import validate_project_id
+
+    requested_project = msg.metadata.get("project_id")
+    if requested_project is not None:
+        if not isinstance(requested_project, str):
+            raise ValueError("project_id metadata must be a string")
+        validated_project = validate_project_id(requested_project)
+        if session.message_count > 0 and validated_project != session.project_id:
+            raise ValueError(
+                "project_id is immutable after a session contains messages; "
+                "start a new conversation to change project scope"
+            )
+        session.project_id = validated_project
     session.touch()
     session.reset_iteration()
 
     wm = gw._get_or_create_working_memory(session)
     wm.clear_for_new_request()
+    wm.session_state["project_id"] = session.project_id
 
     # Route image/video attachments to the VLM for this turn. Cleared by
     # clear_for_new_request() so it only affects the current turn.

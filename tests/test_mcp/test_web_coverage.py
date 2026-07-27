@@ -23,6 +23,12 @@ from cognithor.mcp.web import (
     _is_private_host,
     register_web_tools,
 )
+from cognithor.security.network_guard import PublicHTTPResponse, ResponseTooLarge
+
+
+async def _public_resolver(_hostname: str, _port: int) -> list[str]:
+    return ["93.184.216.34"]
+
 
 # ============================================================================
 # Fixtures
@@ -31,7 +37,10 @@ from cognithor.mcp.web import (
 
 @pytest.fixture
 def web() -> WebTools:
-    return WebTools()
+    instance = WebTools()
+    instance._network_resolver = _public_resolver
+    instance._dns_cache.set("example.com", ["93.184.216.34"])
+    return instance
 
 
 @pytest.fixture
@@ -604,18 +613,16 @@ class TestFormatNewsResults:
 class TestFetchViaJina:
     @pytest.mark.asyncio
     async def test_jina_success(self, web: WebTools) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.text = "Extracted content from Jina"
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        response = PublicHTTPResponse(
+            body=b"Extracted content from Jina",
+            final_url="https://r.jina.ai/https://example.com",
+            content_type="text/plain",
+            status_code=200,
+        )
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(return_value=response),
+        ):
             result = await web._fetch_via_jina("https://example.com")
             assert "Extracted content" in result
 
@@ -623,68 +630,54 @@ class TestFetchViaJina:
     async def test_jina_with_api_key(self) -> None:
         w = WebTools()
         w._jina_api_key = "test-jina-key"
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.text = "Content"
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        response = PublicHTTPResponse(
+            body=b"Content",
+            final_url="https://r.jina.ai/https://example.com",
+            content_type="text/plain",
+            status_code=200,
+        )
+        request = AsyncMock(return_value=response)
+        with patch("cognithor.mcp.web.request_public_http", new=request):
             result = await w._fetch_via_jina("https://example.com")
             assert result == "Content"
+        assert request.await_args.kwargs["headers"]["Authorization"] == "Bearer test-jina-key"
 
     @pytest.mark.asyncio
     async def test_jina_empty_response(self, web: WebTools) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.text = "   "
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        response = PublicHTTPResponse(
+            body=b"   ",
+            final_url="https://r.jina.ai/https://example.com",
+            content_type="text/plain",
+            status_code=200,
+        )
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(return_value=response),
+        ):
             with pytest.raises(WebError, match="Leere Antwort"):
                 await web._fetch_via_jina("https://example.com")
 
     @pytest.mark.asyncio
     async def test_jina_http_error(self, web: WebTools) -> None:
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        mock_response = MagicMock(status_code=500)
+        error = httpx.HTTPStatusError(
             "Server Error",
             request=MagicMock(),
             response=mock_response,
         )
-
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(side_effect=error),
+        ):
             with pytest.raises(WebError, match="Jina Reader HTTP"):
                 await web._fetch_via_jina("https://example.com")
 
     @pytest.mark.asyncio
     async def test_jina_connection_error(self, web: WebTools) -> None:
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_instance = AsyncMock()
-            mock_instance.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
-            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-            mock_instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client.return_value = mock_instance
-
+        with patch(
+            "cognithor.mcp.web.request_public_http",
+            new=AsyncMock(side_effect=httpx.ConnectError("Connection refused")),
+        ):
             with pytest.raises(WebError, match="Verbindungsfehler"):
                 await web._fetch_via_jina("https://example.com")
 
@@ -705,13 +698,10 @@ class TestWebFetchAdditional:
     @pytest.mark.asyncio
     async def test_fetch_auto_fallback_to_jina_on_error(self, web: WebTools) -> None:
         with patch.object(web, "_validate_url", return_value="https://example.com"):
-            with patch("httpx.AsyncClient") as mock_client:
-                mock_instance = AsyncMock()
-                mock_instance.get = AsyncMock(side_effect=httpx.ConnectError("timeout"))
-                mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-                mock_instance.__aexit__ = AsyncMock(return_value=False)
-                mock_client.return_value = mock_instance
-
+            with patch(
+                "cognithor.mcp.web.request_public_http",
+                new=AsyncMock(side_effect=httpx.ConnectError("timeout")),
+            ):
                 with patch.object(web, "_fetch_via_jina", return_value="Jina fallback content"):
                     result = await web.web_fetch("https://example.com", reader_mode="auto")
                     assert "Jina fallback" in result
@@ -719,13 +709,10 @@ class TestWebFetchAdditional:
     @pytest.mark.asyncio
     async def test_fetch_trafilatura_mode_error_raises(self, web: WebTools) -> None:
         with patch.object(web, "_validate_url", return_value="https://example.com"):
-            with patch("httpx.AsyncClient") as mock_client:
-                mock_instance = AsyncMock()
-                mock_instance.get = AsyncMock(side_effect=httpx.ConnectError("fail"))
-                mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-                mock_instance.__aexit__ = AsyncMock(return_value=False)
-                mock_client.return_value = mock_instance
-
+            with patch(
+                "cognithor.mcp.web.request_public_http",
+                new=AsyncMock(side_effect=httpx.ConnectError("fail")),
+            ):
                 with pytest.raises(WebError, match="Fetch fehlgeschlagen"):
                     await web.web_fetch("https://example.com", reader_mode="trafilatura")
 
@@ -739,43 +726,34 @@ class TestWebFetchAdditional:
             await w.web_fetch("https://blocked.com/page")
 
     @pytest.mark.asyncio
-    async def test_fetch_large_response_truncated(self, web: WebTools) -> None:
+    async def test_fetch_large_response_rejected(self, web: WebTools) -> None:
         web._max_fetch_bytes = 50
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.headers = {"content-type": "text/plain"}
-        mock_response.content = b"A" * 200
-
         with patch.object(web, "_validate_url", return_value="https://example.com"):
-            with patch("httpx.AsyncClient") as mock_client:
-                mock_instance = AsyncMock()
-                mock_instance.get = AsyncMock(return_value=mock_response)
-                mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-                mock_instance.__aexit__ = AsyncMock(return_value=False)
-                mock_client.return_value = mock_instance
-
-                result = await web.web_fetch("https://example.com/file.txt")
-                # Should be truncated, not full 200 chars
-                assert len(result) <= 100  # much less than 200
+            with patch(
+                "cognithor.mcp.web.request_public_http",
+                new=AsyncMock(side_effect=ResponseTooLarge("response exceeded 50 bytes")),
+            ):
+                with pytest.raises(WebError, match="Fetch fehlgeschlagen"):
+                    await web.web_fetch(
+                        "https://example.com/file.txt",
+                        reader_mode="trafilatura",
+                    )
 
     @pytest.mark.asyncio
     async def test_fetch_auto_short_trafilatura_jina_fallback(self, web: WebTools) -> None:
         """Auto mode: trafilatura returns short text -> try Jina."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.headers = {"content-type": "text/html"}
-        mock_response.content = b"<html><body><p>Short</p></body></html>"
+        response = PublicHTTPResponse(
+            body=b"<html><body><p>Short</p></body></html>",
+            final_url="https://example.com",
+            content_type="text/html",
+            status_code=200,
+        )
 
         with patch.object(web, "_validate_url", return_value="https://example.com"):
-            with patch("httpx.AsyncClient") as mock_client:
-                mock_instance = AsyncMock()
-                mock_instance.get = AsyncMock(return_value=mock_response)
-                mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-                mock_instance.__aexit__ = AsyncMock(return_value=False)
-                mock_client.return_value = mock_instance
-
+            with patch(
+                "cognithor.mcp.web.request_public_http",
+                new=AsyncMock(return_value=response),
+            ):
                 with patch("cognithor.mcp.web._extract_text_from_html", return_value="Short"):
                     with patch.object(
                         web,
@@ -788,20 +766,18 @@ class TestWebFetchAdditional:
     @pytest.mark.asyncio
     async def test_fetch_auto_jina_fallback_fails(self, web: WebTools) -> None:
         """Auto mode: trafilatura short, Jina also fails -> use trafilatura."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = MagicMock()
-        mock_response.headers = {"content-type": "text/html"}
-        mock_response.content = b"<html><body><p>Short</p></body></html>"
+        response = PublicHTTPResponse(
+            body=b"<html><body><p>Short</p></body></html>",
+            final_url="https://example.com",
+            content_type="text/html",
+            status_code=200,
+        )
 
         with patch.object(web, "_validate_url", return_value="https://example.com"):
-            with patch("httpx.AsyncClient") as mock_client:
-                mock_instance = AsyncMock()
-                mock_instance.get = AsyncMock(return_value=mock_response)
-                mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-                mock_instance.__aexit__ = AsyncMock(return_value=False)
-                mock_client.return_value = mock_instance
-
+            with patch(
+                "cognithor.mcp.web.request_public_http",
+                new=AsyncMock(return_value=response),
+            ):
                 with patch("cognithor.mcp.web._extract_text_from_html", return_value="Short"):
                     with patch.object(web, "_fetch_via_jina", side_effect=WebError("Jina down")):
                         result = await web.web_fetch("https://example.com", reader_mode="auto")
@@ -911,19 +887,8 @@ class TestSearchAndReadCrossCheck:
             ],
         }
 
-        fetch_response = MagicMock()
-        fetch_response.status_code = 200
-        fetch_response.raise_for_status = MagicMock()
-        fetch_response.headers = {"content-type": "text/html"}
-        fetch_response.content = (
-            b"<p>Page content here is reasonably long enough to"
-            b" not trigger jina fallback with more text added here.</p>"
-        )
-
         async def mock_get(url, **kwargs):
-            if "searx" in str(url):
-                return search_response
-            return fetch_response
+            return search_response
 
         with patch("httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
@@ -932,11 +897,17 @@ class TestSearchAndReadCrossCheck:
             mock_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = mock_instance
 
-            # Need DNS to pass
-            w._dns_cache.set("pagea.com", ["93.184.216.34"])
-            w._dns_cache.set("pageb.com", ["93.184.216.35"])
-
-            result = await w.search_and_read("test", num_results=2, cross_check=True)
+            with patch.object(
+                w,
+                "web_fetch",
+                new=AsyncMock(
+                    return_value=(
+                        "Page content here is reasonably long enough to "
+                        "exercise the cross-check path."
+                    ),
+                ),
+            ):
+                result = await w.search_and_read("test", num_results=2, cross_check=True)
             assert "Quellenvergleich" in result
             assert "Quelle 1" in result or "Quelle 2" in result
 

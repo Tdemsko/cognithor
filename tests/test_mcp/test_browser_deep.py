@@ -61,6 +61,7 @@ def _initialized_tool(tmp_path: Path, page: Any | None = None) -> BrowserTool:
     tool = BrowserTool(workspace_dir=tmp_path)
     tool._initialized = True
     tool._page = page or _mock_page()
+    tool._network_resolver = _public_resolver
     return tool
 
 
@@ -70,6 +71,10 @@ def _addrinfo(ip: str, family: int = socket.AF_INET) -> list[tuple[Any, ...]]:
         return [(family, socket.SOCK_STREAM, 0, "", (ip, 0))]
     # IPv6
     return [(family, socket.SOCK_STREAM, 0, "", (ip, 0, 0, 0))]
+
+
+async def _public_resolver(_hostname: str, _port: int) -> list[str]:
+    return ["93.184.216.34"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,16 +266,15 @@ class TestValidateResolvedHost:
         assert err is not None
 
     @pytest.mark.asyncio
-    async def test_resolution_failure_is_passed_through(self) -> None:
-        # NXDOMAIN must NOT be reported as an SSRF block — the navigate call
-        # surfaces the real error so users can debug.
+    async def test_resolution_failure_fails_closed(self) -> None:
+        # A destination whose address cannot be validated must not be contacted.
         async def fake_getaddrinfo(*_: Any, **__: Any) -> list[tuple[Any, ...]]:
             raise OSError("nodename nor servname provided")
 
         with patch("asyncio.get_running_loop") as mock_loop:
             mock_loop.return_value.getaddrinfo = AsyncMock(side_effect=fake_getaddrinfo)
             err = await BrowserTool._validate_resolved_host("http://nx.example.invalid/")
-        assert err is None
+        assert err is not None
 
     @pytest.mark.asyncio
     async def test_public_ip_passes(self) -> None:
@@ -321,13 +325,8 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_dns_layer_ssrf_blocked(self, tmp_path: Path) -> None:
         tool = _initialized_tool(tmp_path)
-
-        async def fake_getaddrinfo(*_: Any, **__: Any) -> list[tuple[Any, ...]]:
-            return _addrinfo("127.0.0.1")
-
-        with patch("asyncio.get_running_loop") as mock_loop:
-            mock_loop.return_value.getaddrinfo = AsyncMock(side_effect=fake_getaddrinfo)
-            result = await tool.navigate("http://rebind.evil.test/")
+        tool._network_resolver = AsyncMock(return_value=["127.0.0.1"])
+        result = await tool.navigate("http://rebind.evil.test/")
 
         assert result.success is False
         tool._page.goto.assert_not_called()

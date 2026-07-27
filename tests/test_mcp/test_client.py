@@ -34,6 +34,9 @@ def config(tmp_path: Path) -> CognithorConfig:
         cognithor_home=tmp_path / ".cognithor",
         security=SecurityConfig(allowed_paths=[str(tmp_path)]),
     )
+    # These legacy integration tests deliberately exercise local process
+    # execution when no OS sandbox is installed.
+    cfg.sandbox.allow_degraded_sandbox = True
     ensure_directory_structure(cfg)
     return cfg
 

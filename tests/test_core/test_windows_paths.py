@@ -165,10 +165,11 @@ class TestTempDirectory:
         assert tmp != "/tmp", f"Temp-Verzeichnis ist /tmp auf Windows: {tmp}"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-spezifisch")
-    def test_unix_temp_is_tmp(self):
-        """Auf Unix sollte der Temp-Pfad /tmp enthalten."""
-        tmp = tempfile.gettempdir()
-        assert "tmp" in tmp.lower(), f"Unerwartetes Temp-Verzeichnis: {tmp}"
+    def test_unix_temp_is_absolute_directory(self):
+        """Unix temp paths vary (/tmp on Linux, /var/folders on macOS)."""
+        tmp = Path(tempfile.gettempdir())
+        assert tmp.is_absolute()
+        assert tmp.is_dir(), f"Unerwartetes Temp-Verzeichnis: {tmp}"
 
 
 # ============================================================================

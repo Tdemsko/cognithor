@@ -21,6 +21,9 @@ from cognithor.models import (
 @pytest.fixture()
 def config(tmp_path) -> CognithorConfig:
     cfg = CognithorConfig(cognithor_home=tmp_path)
+    # Coverage below intentionally exercises the legacy non-home-lab stores.
+    # The secure project-scoped path is covered by security contracts.
+    cfg.security.home_lab_mode = False
     ensure_directory_structure(cfg)
     return cfg
 

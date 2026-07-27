@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,8 +30,6 @@ from cognithor.security.encrypted_db import (
 from cognithor.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    import sqlite3
-
     from cognithor.config import CognithorConfig
 
 log = get_logger(__name__)
@@ -235,7 +234,7 @@ class DatabaseTools:
             if row_count_note:
                 table += row_count_note
             return table
-        except _EncryptedOperationalError as exc:
+        except (_EncryptedOperationalError, sqlite3.OperationalError) as exc:
             if "interrupted" in str(exc).lower():
                 raise DatabaseError(t("tools.db_query_timeout", seconds=_QUERY_TIMEOUT_S)) from exc
             raise DatabaseError(t("tools.db_sql_error", exc=exc)) from exc
@@ -342,7 +341,7 @@ class DatabaseTools:
             conn.commit()
             rows_affected = cursor.rowcount
             return t("tools.db_rows_affected", count=rows_affected)
-        except _EncryptedOperationalError as exc:
+        except (_EncryptedOperationalError, sqlite3.OperationalError) as exc:
             if "interrupted" in str(exc).lower():
                 raise DatabaseError(t("tools.db_query_timeout", seconds=_QUERY_TIMEOUT_S)) from exc
             raise DatabaseError(t("tools.db_sql_error", exc=exc)) from exc

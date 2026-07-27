@@ -29,6 +29,23 @@ from cognithor.utils.logging import get_logger
 
 log = get_logger(__name__)
 
+
+class CredentialStoreError(RuntimeError):
+    """Base class for credential-store failures."""
+
+
+class CredentialStoreUnavailableError(CredentialStoreError):
+    """The credential store cannot provide its security guarantees."""
+
+
+class CredentialStoreIntegrityError(CredentialStoreError):
+    """Encrypted credential data could not be authenticated or decoded."""
+
+
+class CredentialMappingError(CredentialStoreError):
+    """A deterministic credential mapping is invalid or unresolved."""
+
+
 # Optional import: cryptography for Fernet
 _HAS_CRYPTO = False
 try:
@@ -79,9 +96,8 @@ class CredentialStore:
     """Encrypted credential store. [B§11.2]
 
     Stores key-value pairs encrypted as JSON on disk.
-    Supports two modes:
-      1. Fernet (AES-256) -- when `cryptography` is installed
-      2. Base64 obfuscation -- fallback for development (INSECURE)
+    The store is fail-closed: Fernet encryption and a master key are
+    mandatory.  There is no plaintext or obfuscation fallback.
 
     The planner has no direct access. Credentials are
     provided by the gatekeeper via inject_credentials().
@@ -110,8 +126,6 @@ class CredentialStore:
         self._entries: dict[str, _StoredCredential] = {}
         self._loaded = False
 
-    _passphrase_warned: bool = False
-
     @staticmethod
     def _try_keyring() -> str:
         """Try to get or create a credential passphrase from OS keyring."""
@@ -133,15 +147,12 @@ class CredentialStore:
     def _init_fernet(self) -> Any:
         """Initializes Fernet encryption."""
         if not self._passphrase:
-            if not CredentialStore._passphrase_warned:
-                CredentialStore._passphrase_warned = True
-                log.warning(
-                    "credential_store_no_passphrase: Credentials are NOT encrypted! "
-                    "Set COGNITHOR_CREDENTIAL_KEY env var for encryption."
-                )
-            return None
+            raise CredentialStoreUnavailableError(
+                "Credential encryption key unavailable. Configure the OS keyring "
+                "or COGNITHOR_CREDENTIAL_KEY before using the credential store."
+            )
         if not _HAS_CRYPTO:
-            raise RuntimeError(
+            raise CredentialStoreUnavailableError(
                 "cryptography package required for credential encryption. pip install cryptography"
             )
         key = _derive_key(self._passphrase, self._salt)
@@ -194,7 +205,14 @@ class CredentialStore:
             encrypted=self._fernet is not None,
         )
 
-    def retrieve(self, service: str, key: str, agent_id: str = "") -> str | None:
+    def retrieve(
+        self,
+        service: str,
+        key: str,
+        agent_id: str = "",
+        *,
+        allow_global_fallback: bool = True,
+    ) -> str | None:
         """Retrieves a credential (ONLY for executor/gatekeeper).
 
         Checks agent-specific credentials first, then global.
@@ -217,7 +235,9 @@ class CredentialStore:
                 stored.last_accessed = datetime.now(UTC)
                 return self._decrypt(stored.encrypted_value)
 
-        # 2. Global credential (fallback)
+        # 2. Global credential (explicit fallback)
+        if agent_id and not allow_global_fallback:
+            return None
         global_lookup = f"{service}:{key}"
         stored = self._entries.get(global_lookup)
         if not stored:
@@ -288,7 +308,15 @@ class CredentialStore:
             return True
         return f"{service}:{key}" in self._entries
 
-    def inject_credentials(self, params: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
+    def inject_credentials(
+        self,
+        params: dict[str, Any],
+        mapping: dict[str, str],
+        *,
+        agent_id: str = "",
+        allow_global_fallback: bool = False,
+        strict: bool = True,
+    ) -> dict[str, Any]:
         """Injects credentials into tool parameters.
 
         Called by the gatekeeper, NOT by the planner.
@@ -297,6 +325,12 @@ class CredentialStore:
             params: The tool parameters.
             mapping: Mapping from param name -> 'service:key'.
                     e.g. {'api_key': 'searxng:api_key'}
+            agent_id: Credential namespace for the executing capability.
+            allow_global_fallback: Permit a scoped agent to use a global
+                credential. Disabled by default so capability scopes do not
+                silently broaden.
+            strict: Raise when a mapping is malformed or unresolved. This is
+                enabled by default for model-triggered tool execution.
 
         Returns:
             Copy of parameters with injected credentials.
@@ -304,12 +338,30 @@ class CredentialStore:
         result = dict(params)
         for param_name, credential_ref in mapping.items():
             parts = credential_ref.split(":", 1)
-            if len(parts) != 2:
+            if (
+                len(parts) != 2
+                or not param_name.strip()
+                or not parts[0].strip()
+                or not parts[1].strip()
+            ):
+                if strict:
+                    raise CredentialMappingError(
+                        f"Invalid credential mapping for parameter {param_name!r}"
+                    )
                 continue
             service, key = parts
-            value = self.retrieve(service, key)
+            value = self.retrieve(
+                service,
+                key,
+                agent_id=agent_id,
+                allow_global_fallback=allow_global_fallback,
+            )
             if value is not None:
                 result[param_name] = value
+            elif strict:
+                raise CredentialMappingError(
+                    f"Credential reference unavailable for parameter {param_name!r}"
+                )
         return result
 
     @property
@@ -340,20 +392,16 @@ class CredentialStore:
         """Decrypts an encrypted value."""
         try:
             if not self._fernet:
-                raise RuntimeError(
+                raise CredentialStoreUnavailableError(
                     "cryptography package required for credential decryption. "
                     "pip install cryptography"
                 )
             return self._fernet.decrypt(ciphertext.encode()).decode()  # type: ignore[no-any-return]
         except Exception as exc:
-            # Ciphertext prefix for debugging (first 8 chars, no secrets exposed)
-            preview = ciphertext[:8] + "..." if len(ciphertext) > 8 else ciphertext
-            log.warning(
-                "credential_decrypt_failed",
-                error=str(exc),
-                ciphertext_preview=preview,
-            )
-            return None
+            log.error("credential_decrypt_failed", error_type=type(exc).__name__)
+            raise CredentialStoreIntegrityError(
+                "Credential ciphertext failed authentication or decoding"
+            ) from exc
 
     def _ensure_loaded(self) -> None:
         """Loads the store from disk if needed."""
@@ -382,8 +430,11 @@ class CredentialStore:
                         ),
                         agent_id=entry_data.get("agent_id", ""),
                     )
-            except (json.JSONDecodeError, KeyError, OSError) as exc:
+            except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError) as exc:
                 log.error("credential_store_load_failed", error=str(exc))
+                raise CredentialStoreIntegrityError(
+                    "Credential store is unreadable or structurally invalid"
+                ) from exc
         self._loaded = True
 
     def _save(self) -> None:

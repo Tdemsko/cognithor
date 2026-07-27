@@ -32,6 +32,11 @@ from urllib.parse import urlparse
 import httpx
 
 from cognithor.i18n import t
+from cognithor.security.network_guard import (
+    NetworkAccessDenied,
+    redact_url_for_log,
+    request_public_http,
+)
 from cognithor.utils.logging import get_logger
 from cognithor.utils.ttl_dict import TTLDict
 
@@ -156,6 +161,10 @@ class WebTools:
         self._http_request_timeout: int = 30
         self._http_request_rate_limit: float = 1.0
         self._http_request_last_call: float = 0.0
+        # Test/deployment injection points for the deterministic public-egress
+        # boundary. Production leaves both at None.
+        self._network_resolver: Any = None
+        self._network_transport: httpx.AsyncBaseTransport | None = None
 
         # Load from config if available
         if config is not None:
@@ -1046,30 +1055,38 @@ class WebTools:
         # Standard fetch
         fetch_failed = False
         try:
-            async with httpx.AsyncClient(
-                timeout=self._fetch_timeout,
-                follow_redirects=True,
+            response = await request_public_http(
+                validated,
+                timeout_seconds=float(self._fetch_timeout),
+                max_bytes=self._max_fetch_bytes,
                 max_redirects=5,
                 headers={"User-Agent": DEFAULT_USER_AGENT},
-            ) as client:
-                resp = await client.get(validated)
-                resp.raise_for_status()
-        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                allowed_domains=(set(self._domain_allowlist) if self._domain_allowlist else None),
+                blocked_domains=(set(self._domain_blocklist) if self._domain_blocklist else None),
+                resolver=self._network_resolver,
+                transport=self._network_transport,
+            )
+        except (
+            httpx.HTTPStatusError,
+            httpx.RequestError,
+            NetworkAccessDenied,
+        ) as exc:
             if reader_mode == "trafilatura":
                 raise WebError(f"Fetch fehlgeschlagen für {url}: {exc}") from exc
             # auto mode: try Jina as fallback on error
-            log.warning("web_fetch_failed_trying_jina", url=url, error=str(exc))
+            log.warning(
+                "web_fetch_failed_trying_jina",
+                url=redact_url_for_log(validated),
+                error_type=type(exc).__name__,
+            )
             fetch_failed = True
 
         if fetch_failed:
             text = await self._fetch_via_jina(validated)
             return _truncate_text(text, max_chars, url)
 
-        content_type = resp.headers.get("content-type", "")
-        raw = resp.content
-
-        if len(raw) > self._max_fetch_bytes:
-            raw = raw[: self._max_fetch_bytes]
+        content_type = response.content_type
+        raw = response.body
 
         # Non-HTML → return as plaintext
         if "text/html" not in content_type and extract_text:
@@ -1086,13 +1103,21 @@ class WebTools:
 
         # Auto mode: Jina fallback when content is short (<200 chars)
         if reader_mode == "auto" and len(text.strip()) < 200:
-            log.info("trafilatura_short_trying_jina", url=url, chars=len(text.strip()))
+            log.info(
+                "trafilatura_short_trying_jina",
+                url=redact_url_for_log(url),
+                chars=len(text.strip()),
+            )
             try:
                 jina_text = await self._fetch_via_jina(validated)
                 if len(jina_text.strip()) > len(text.strip()):
                     text = jina_text
             except Exception as jina_exc:
-                log.debug("jina_fallback_failed", url=url, error=str(jina_exc))
+                log.debug(
+                    "jina_fallback_failed",
+                    url=redact_url_for_log(url),
+                    error_type=type(jina_exc).__name__,
+                )
 
         return _truncate_text(text, max_chars, url)
 
@@ -1161,27 +1186,34 @@ class WebTools:
         max_chars = self._max_text_chars
 
         try:
-            async with httpx.AsyncClient(
-                timeout=float(timeout_seconds),
-                follow_redirects=True,
+            request_headers = {"User-Agent": DEFAULT_USER_AGENT}
+            request_headers.update(headers or {})
+            response = await request_public_http(
+                validated,
+                method=method,
+                headers=request_headers,
+                body=body,
+                timeout_seconds=float(timeout_seconds),
+                max_bytes=max_body,
                 max_redirects=5,
-                headers={"User-Agent": DEFAULT_USER_AGENT},
-            ) as client:
-                resp = await client.request(
-                    method,
-                    validated,
-                    headers=headers,
-                    content=body,
-                )
+                raise_for_status=False,
+                allowed_domains=(set(self._domain_allowlist) if self._domain_allowlist else None),
+                blocked_domains=(set(self._domain_blocklist) if self._domain_blocklist else None),
+                resolver=self._network_resolver,
+                transport=self._network_transport,
+            )
         except httpx.TimeoutException as exc:
             raise WebError(f"Timeout nach {timeout_seconds}s für {url}") from exc
-        except httpx.RequestError as exc:
+        except (
+            httpx.RequestError,
+            NetworkAccessDenied,
+        ) as exc:
             raise WebError(f"Request fehlgeschlagen für {url}: {exc}") from exc
 
-        ct = resp.headers.get("content-type", "")
-        body_text = resp.text[:max_chars] if resp.text else ""
+        ct = response.content_type
+        body_text = response.body.decode("utf-8", errors="replace")[:max_chars]
 
-        return f"HTTP {resp.status_code}\nContent-Type: {ct}\n\n{body_text}"
+        return f"HTTP {response.status_code}\nContent-Type: {ct}\n\n{body_text}"
 
     async def _fetch_via_jina(self, url: str) -> str:
         """Fetcht eine URL ueber den Jina AI Reader Service.
@@ -1202,19 +1234,30 @@ class WebTools:
         if self._jina_api_key:
             headers["Authorization"] = f"Bearer {self._jina_api_key}"
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            try:
-                resp = await client.get(jina_url, headers=headers)
-                resp.raise_for_status()
-                text = resp.text
-                if text.strip():
-                    log.info("jina_fetch_ok", url=url, chars=len(text))
-                    return text
-                raise WebError(f"Jina Reader: Leere Antwort für {url}")
-            except httpx.HTTPStatusError as exc:
-                raise WebError(f"Jina Reader HTTP {exc.response.status_code} für {url}") from exc
-            except httpx.RequestError as exc:
-                raise WebError(f"Jina Reader Verbindungsfehler für {url}: {exc}") from exc
+        try:
+            response = await request_public_http(
+                jina_url,
+                headers=headers,
+                timeout_seconds=30,
+                max_bytes=self._max_fetch_bytes,
+                max_redirects=3,
+                allowed_domains={"r.jina.ai"},
+                resolver=self._network_resolver,
+                transport=self._network_transport,
+            )
+            text = response.body.decode("utf-8", errors="replace")
+            if text.strip():
+                log.info(
+                    "jina_fetch_ok",
+                    url=redact_url_for_log(url),
+                    chars=len(text),
+                )
+                return text
+            raise WebError(f"Jina Reader: Leere Antwort für {url}")
+        except httpx.HTTPStatusError as exc:
+            raise WebError(f"Jina Reader HTTP {exc.response.status_code} für {url}") from exc
+        except (httpx.RequestError, NetworkAccessDenied) as exc:
+            raise WebError(f"Jina Reader Verbindungsfehler für {url}: {exc}") from exc
 
     # ── Combination: Search + Fetch ─────────────────────────────────────────
 

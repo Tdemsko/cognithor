@@ -93,6 +93,7 @@ async def execute_delegation(
         user_id=session.user_id,
         channel=session.channel,
         agent_name=to_agent,
+        project_id=session.project_id,
         parent_session_id=session.session_id,
         fork_reason=f"delegated from {from_agent}: {task[:200]}",
     )
@@ -183,6 +184,7 @@ async def execute_delegation(
         sandbox_overrides=target.get_sandbox_config(),
         agent_name=target.name,
         session_id=session.session_id,
+        project_id=session.project_id,
     )
 
     try:

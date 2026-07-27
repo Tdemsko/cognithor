@@ -378,7 +378,7 @@ class TestCognithorToolDecorator:
 
 class TestGatekeeperUsesRegistry:
     def test_pack_tool_risk_honored(self):
-        """After loader wires the registry, Gatekeeper must classify accordingly."""
+        """Pack metadata cannot downgrade an unclassified home-lab tool."""
         gk = Gatekeeper(CognithorConfig())
         registry: dict[str, MCPToolInfo] = {
             "reddit_score_leads": MCPToolInfo(
@@ -392,7 +392,7 @@ class TestGatekeeperUsesRegistry:
         risk = gk._classify_risk(
             PlannedAction(tool="reddit_score_leads", params={}, rationale="probe")
         )
-        assert risk.value == "green"
+        assert risk.value == "orange"
 
     def test_unknown_tool_still_orange(self):
         gk = Gatekeeper(CognithorConfig())

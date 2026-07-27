@@ -224,19 +224,27 @@ class OllamaClient:
         self._keep_alive = config.ollama.keep_alive
         self._client: httpx.AsyncClient | None = None
 
-        # PII redactor — opt-in via config.security.pii_redactor.enabled.
-        # Instantiate once here so the regex patterns compile exactly
-        # once per OllamaClient lifetime.
+        # PII redactor. Personal-data categories remain operator-configurable,
+        # but the home-lab profile always removes known API credentials and
+        # private keys before a prompt reaches any model endpoint (including
+        # the local Spark). Credential injection belongs below the model layer.
         self._pii_redactor = None
         pii_cfg = config.security.pii_redactor
-        if pii_cfg.enabled and pii_cfg.categories:
+        categories = list(pii_cfg.categories) if pii_cfg.enabled else []
+        if getattr(config.security, "home_lab_mode", False):
+            for required_category in ("api_key", "private_key"):
+                if required_category not in categories:
+                    categories.append(required_category)
+        if categories:
             from cognithor.security.pii_redactor import PIIRedactor
 
             self._pii_redactor = PIIRedactor(
-                categories=pii_cfg.categories,
+                categories=categories,
                 replacement_template=pii_cfg.replacement_template,
             )
-            self._pii_log_redactions = pii_cfg.log_redactions
+            self._pii_log_redactions = bool(
+                pii_cfg.log_redactions or getattr(config.security, "home_lab_mode", False)
+            )
         else:
             self._pii_log_redactions = False
 

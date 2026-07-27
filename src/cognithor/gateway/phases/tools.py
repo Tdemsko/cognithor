@@ -305,7 +305,7 @@ async def init_tools(
         try:
             from cognithor.mcp.browser import register_browser_tools
 
-            register_browser_tools(mcp_client)
+            register_browser_tools(mcp_client, config=config)
         except Exception:
             log.warning("browser_tools_not_registered", exc_info=True)
     result["browser_agent"] = browser_agent

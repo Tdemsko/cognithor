@@ -81,6 +81,7 @@ class IngestConfig:
     # Chunking (Defaults aus MemoryManager)
     chunk_size_tokens: int = 512
     chunk_overlap_tokens: int = 64
+    project_id: str = "default"
 
 
 # ============================================================================
@@ -384,9 +385,21 @@ class IngestPipeline:
                 if self._config.generate_embeddings and hasattr(
                     self._memory, "index_with_embeddings"
                 ):
-                    chunks_created = await self._memory.index_with_embeddings(file_path)
+                    chunks_created = await self._memory.index_with_embeddings(
+                        file_path,
+                        project_id=self._config.project_id,
+                        source_type="ingest",
+                        source_id=source_path,
+                        source_trust="untrusted_external",
+                    )
                 elif hasattr(self._memory, "index_text"):
-                    chunks_created = self._memory.index_text(text, source_path)
+                    chunks_created = self._memory.index_text(
+                        text,
+                        source_path,
+                        project_id=self._config.project_id,
+                        source_type="ingest",
+                        source_trust="untrusted_external",
+                    )
                 else:
                     log.warning("memory_manager_missing_index_method")
             else:

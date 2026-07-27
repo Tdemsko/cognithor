@@ -167,6 +167,7 @@ class TestMemoryInjection:
             query="Wie funktioniert das Backup-System?",
             top_k=8,  # default memory_top_k
             enhanced=True,
+            project_id="default",
         )
 
 

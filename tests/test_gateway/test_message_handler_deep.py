@@ -436,6 +436,38 @@ class TestResolveAgentRoute:
         assert wm.image_attachments == []
 
     @pytest.mark.asyncio
+    async def test_project_scope_can_be_set_before_first_session_message(self) -> None:
+        gw = _bare_gateway()
+        sess = SessionContext(session_id="s", channel="cli")
+        wm = WorkingMemory()
+        gw._get_or_create_session = MagicMock(return_value=sess)  # type: ignore[attr-defined]
+        gw._get_or_create_working_memory = MagicMock(return_value=wm)  # type: ignore[attr-defined]
+
+        await resolve_agent_route(gw, _msg(metadata={"project_id": "MultiACE"}))
+
+        assert sess.project_id == "multiace"
+        assert wm.session_state["project_id"] == "multiace"
+
+    @pytest.mark.asyncio
+    async def test_project_scope_cannot_change_inside_existing_session(self) -> None:
+        gw = _bare_gateway()
+        sess = SessionContext(
+            session_id="s",
+            channel="cli",
+            project_id="multiace",
+            message_count=1,
+        )
+        wm = WorkingMemory()
+        gw._get_or_create_session = MagicMock(return_value=sess)  # type: ignore[attr-defined]
+        gw._get_or_create_working_memory = MagicMock(return_value=wm)  # type: ignore[attr-defined]
+
+        with pytest.raises(ValueError, match="immutable"):
+            await resolve_agent_route(gw, _msg(metadata={"project_id": "print-cave"}))
+
+        assert sess.project_id == "multiace"
+        gw._get_or_create_working_memory.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_skill_generator_gap_detection_for_tool_request(self) -> None:
         gw = _bare_gateway()
         sg = MagicMock()

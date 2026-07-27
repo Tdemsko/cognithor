@@ -17,7 +17,13 @@ from cognithor.mcp.browser import (
 
 @pytest.fixture
 def tool(tmp_path: Path) -> BrowserTool:
-    return BrowserTool(workspace_dir=tmp_path)
+    instance = BrowserTool(workspace_dir=tmp_path)
+    instance._network_resolver = _public_resolver
+    return instance
+
+
+async def _public_resolver(_hostname: str, _port: int) -> list[str]:
+    return ["93.184.216.34"]
 
 
 class TestBrowserToolInit:

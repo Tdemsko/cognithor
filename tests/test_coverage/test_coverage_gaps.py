@@ -1081,10 +1081,11 @@ class TestSandbox:
 
     @pytest.fixture()
     def sandbox(self):
-        from cognithor.models import SandboxConfig
+        from cognithor.models import SandboxConfig, SandboxLevel
         from cognithor.security.sandbox import Sandbox
 
-        config = SandboxConfig()
+        # Functional unit tests explicitly opt into process execution.
+        config = SandboxConfig(level=SandboxLevel.PROCESS)
         return Sandbox(config)
 
     def test_sandbox_init(self, sandbox):

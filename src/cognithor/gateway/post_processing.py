@@ -36,6 +36,13 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
+def _home_lab_mode(gw: Gateway) -> bool:
+    """Return True only for the explicit deterministic home-lab profile."""
+    config = getattr(gw, "_config", None)
+    security = getattr(config, "security", None)
+    return getattr(security, "home_lab_mode", False) is True
+
+
 async def run_post_processing(
     gw: Gateway,
     session: SessionContext,
@@ -45,6 +52,7 @@ async def run_post_processing(
     run_id: str | None,
 ) -> None:
     """Phase 4: Reflection, Skill-Tracking, Telemetry, Profiler, Run-Recording."""
+    home_lab_mode = _home_lab_mode(gw)
     if gw._reflector and gw._reflector.should_reflect(agent_result):
         try:
             reflection = await gw._reflector.reflect(session, wm, agent_result)
@@ -57,7 +65,11 @@ async def run_post_processing(
             # Apply reflection to memory tiers (episodic, semantic, procedural)
             if gw._memory_manager:
                 try:
-                    counts = await gw._reflector.apply(reflection, gw._memory_manager)
+                    counts = await gw._reflector.apply(
+                        reflection,
+                        gw._memory_manager,
+                        project_id=session.project_id,
+                    )
                     log.info(
                         "reflection_applied",
                         session=session.session_id[:8],
@@ -76,7 +88,8 @@ async def run_post_processing(
             # If reflection shows poor quality or user corrected us,
             # create a learning goal so the Evolution Engine researches it.
             if (
-                reflection.success_score < 0.5
+                not home_lab_mode
+                and reflection.success_score < 0.5
                 and hasattr(gw, "_deep_learner")
                 and gw._deep_learner
                 and hasattr(gw, "_evolution_loop")
@@ -106,7 +119,7 @@ async def run_post_processing(
             log.error("reflection_error", error=str(exc))
 
     # Meta-Reasoning: record strategy outcome
-    if getattr(gw, "_strategy_memory", None):
+    if getattr(gw, "_strategy_memory", None) and not home_lab_mode:
         try:
             from cognithor.learning.strategy_memory import (
                 StrategyRecord,
@@ -137,7 +150,7 @@ async def run_post_processing(
         except Exception:
             log.debug("strategy_record_failed", exc_info=True)
 
-    if active_skill and gw._skill_registry:
+    if active_skill and gw._skill_registry and not home_lab_mode:
         try:
             success = agent_result.success
             score = (
@@ -150,8 +163,14 @@ async def run_post_processing(
                 success=success,
                 score=score,
             )
-            # Store failure pattern in procedure (for learning effect)
-            if not success and gw._memory_manager and active_skill.procedure_name:
+            # Never let model/session data silently modify installed
+            # procedures in the home-lab profile.
+            if (
+                not home_lab_mode
+                and not success
+                and gw._memory_manager
+                and active_skill.procedure_name
+            ):
                 try:
                     error_summary = agent_result.error[:200] if agent_result.error else "unknown"
                     gw._memory_manager.procedural.add_failure_pattern(
@@ -162,7 +181,12 @@ async def run_post_processing(
                     log.debug("procedure_failure_pattern_save_failed", exc_info=True)
 
             # Gap Detection: Melde niedrige Erfolgsrate
-            if not success and hasattr(gw, "_skill_generator") and gw._skill_generator:
+            if (
+                not home_lab_mode
+                and not success
+                and hasattr(gw, "_skill_generator")
+                and gw._skill_generator
+            ):
                 try:
                     skill_obj = active_skill.skill
                     if skill_obj.total_uses >= 3 and skill_obj.total_uses > 0:
@@ -224,7 +248,7 @@ async def run_post_processing(
             log.debug("run_recorder_finish_failed", exc_info=True)
 
     # Prompt-Evolution: Record session reward for A/B testing
-    if getattr(gw, "_prompt_evolution", None) and gw._planner:
+    if getattr(gw, "_prompt_evolution", None) and gw._planner and not home_lab_mode:
         try:
             version_id = getattr(gw._planner, "_current_prompt_version_id", None)
             if version_id:
@@ -242,7 +266,7 @@ async def run_post_processing(
             log.debug("prompt_evolution_record_failed", exc_info=True)
 
     # GEPA: Collect execution trace
-    if getattr(gw, "_trace_store", None):
+    if getattr(gw, "_trace_store", None) and not home_lab_mode:
         try:
             import time as _time
             import uuid as _uuid
@@ -292,7 +316,11 @@ async def run_post_processing(
             log.debug("gepa_trace_save_failed", exc_info=True)
 
     # Reflexion: check for known solutions before recording new errors
-    if getattr(gw, "_reflexion_memory", None) and hasattr(agent_result, "tool_results"):
+    if (
+        getattr(gw, "_reflexion_memory", None)
+        and hasattr(agent_result, "tool_results")
+        and not home_lab_mode
+    ):
         try:
             for tr in agent_result.tool_results or []:
                 if getattr(tr, "is_error", False) or getattr(tr, "error", None):
@@ -324,7 +352,7 @@ async def run_post_processing(
             log.debug("reflexion_post_processing_failed", exc_info=True)
 
     # GEPA: Run evolution cycle if due
-    if getattr(gw, "_evolution_orchestrator", None):
+    if getattr(gw, "_evolution_orchestrator", None) and not home_lab_mode:
         try:
             import asyncio as _asyncio
             import time as _time
@@ -353,7 +381,7 @@ async def run_post_processing(
             log.debug("gepa_evolution_cycle_failed", exc_info=True)
 
     # Session-Analyse: Failure-Clustering und Feedback-Loop
-    if getattr(gw, "_session_analyzer", None):
+    if getattr(gw, "_session_analyzer", None) and not home_lab_mode:
         try:
             improvements = await gw._session_analyzer.analyze_session(
                 session_id=session.session_id,
@@ -381,14 +409,14 @@ async def run_post_processing(
             log.debug("session_analysis_failed", exc_info=True)
 
     # Pattern Documentation: record successful tool sequences
-    if gw._memory_manager:
+    if gw._memory_manager and not home_lab_mode:
         try:
             gw._maybe_record_pattern(session, wm, agent_result)
         except Exception:
             log.debug("pattern_documentation_post_failed", exc_info=True)
 
     # Self-Learning: Process actionable skill gaps (auto-generate new tools)
-    if hasattr(gw, "_skill_generator") and gw._skill_generator:
+    if hasattr(gw, "_skill_generator") and gw._skill_generator and not home_lab_mode:
         try:
             generated = await gw._skill_generator.process_all_gaps(
                 skill_registry=gw._skill_registry if hasattr(gw, "_skill_registry") else None,
@@ -432,6 +460,13 @@ def maybe_record_pattern(
     checks for similar existing patterns, and stores new ones.
     Rate limited to max 5 recordings per hour.
     """
+    if _home_lab_mode(gw):
+        log.info(
+            "pattern_documentation_skipped",
+            reason="home_lab_model_derived_self_improvement",
+            project_id=session.project_id,
+        )
+        return
     try:
         # Only record successful executions with tool results
         if not agent_result.success or not agent_result.tool_results:

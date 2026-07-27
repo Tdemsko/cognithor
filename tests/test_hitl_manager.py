@@ -468,8 +468,8 @@ class TestApprovalManager:
         )
         req = await mgr.create_request("e1", "graph", "node", config)
         task = await mgr.wait_for_resolution(req.request_id, timeout=0.1)
-        # Should auto-approve after timeout
         assert task is not None
+        assert task.request.status == ApprovalStatus.TIMED_OUT
 
     @pytest.mark.asyncio
     async def test_cleanup(self) -> None:

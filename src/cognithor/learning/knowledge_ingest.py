@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from cognithor.memory.trust import (
+    DEFAULT_PROJECT_ID,
+    SourceTrust,
+    resolve_project_id,
+)
+from cognithor.security.network_guard import fetch_public_http, redact_url_for_log
 from cognithor.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -54,6 +60,7 @@ class IngestResult:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     priority: Priority = Priority.NORMAL
     deep_learn_status: str = "pending"  # pending, queued, skipped, completed, failed
+    project_id: str = DEFAULT_PROJECT_ID
 
     @property
     def chunks(self) -> int:
@@ -70,6 +77,7 @@ class _QueueItem:
     source: str
     priority: Priority
     page_images: list[Path]
+    project_id: str = DEFAULT_PROJECT_ID
 
     def __lt__(self, other: _QueueItem) -> bool:
         return self.priority < other.priority
@@ -94,11 +102,18 @@ class IngestQueue:
     def __len__(self) -> int:
         return len(self._heap)
 
-    def pending(self) -> list[dict[str, str]]:
+    def pending(self, *, project_id: str | None = None) -> list[dict[str, str]]:
         """Return queue contents for the API (without consuming)."""
+        project = resolve_project_id(project_id) if project_id is not None else None
         return [
-            {"id": item.result_id, "source": item.source, "priority": item.priority.name}
+            {
+                "id": item.result_id,
+                "source": item.source,
+                "priority": item.priority.name,
+                "project_id": item.project_id,
+            }
             for item in sorted(self._heap)
+            if project is None or item.project_id == project
         ]
 
 
@@ -112,12 +127,14 @@ class KnowledgeIngestService:
         llm_fn: Any | None = None,
         evolution_loop: Any | None = None,
         on_progress: Any | None = None,
+        home_lab_mode: bool = False,
     ) -> None:
         self._memory = memory
         self._knowledge_builder = knowledge_builder
         self._llm_fn = llm_fn
         self._evolution_loop = evolution_loop
         self._on_progress = on_progress
+        self._home_lab_mode = home_lab_mode
         self._results: list[IngestResult] = []
         self._queue = IngestQueue()
         self._worker_task: asyncio.Task[Any] | None = None
@@ -138,6 +155,7 @@ class KnowledgeIngestService:
         provenance_source_type: str | None = None,
         provenance_source_id: str | None = None,
         provenance_notes: str = "",
+        project_id: str | None = None,
     ) -> IngestResult:
         """Ingest a file (PDF, DOCX, TXT, MD, images).
 
@@ -148,11 +166,13 @@ class KnowledgeIngestService:
         the operational-trust receipt answer "which upload produced
         this knowledge chunk?" without parsing the source URL.
         """
+        project = resolve_project_id(project_id)
         result = IngestResult(
             id=str(uuid4()),
             source_type="file",
             source_name=filename,
             status="processing",
+            project_id=project,
         )
         try:
             text = await self._extract_text(content, filename)
@@ -166,7 +186,13 @@ class KnowledgeIngestService:
             # Index into memory
             chunks = 0
             if self._memory and hasattr(self._memory, "index_text"):
-                chunks = self._memory.index_text(text, f"upload://{filename}")
+                chunks = self._memory.index_text(
+                    text,
+                    f"upload://{filename}",
+                    project_id=project,
+                    source_type="upload",
+                    source_trust=SourceTrust.UNTRUSTED_EXTERNAL,
+                )
 
             result.status = "success"
             result.chunks_created = chunks
@@ -174,7 +200,7 @@ class KnowledgeIngestService:
             result.priority = priority
 
             # Queue for deep learning
-            if priority == Priority.LOW:
+            if priority == Priority.LOW or self._home_lab_mode:
                 result.deep_learn_status = "skipped"
             else:
                 result.deep_learn_status = "queued"
@@ -186,6 +212,7 @@ class KnowledgeIngestService:
                     source=f"upload://{filename}",
                     priority=priority,
                     page_images=page_images,
+                    project_id=project,
                 )
                 self._queue.enqueue(item)
                 self._ensure_worker()
@@ -246,18 +273,26 @@ class KnowledgeIngestService:
         self,
         url: str,
         priority: Priority = Priority.NORMAL,
+        *,
+        project_id: str | None = None,
     ) -> IngestResult:
         """Ingest a website URL (extracts main content via trafilatura)."""
+        project = resolve_project_id(project_id)
         result = IngestResult(
             id=str(uuid4()),
             source_type="url",
             source_name=url,
             status="processing",
+            project_id=project,
         )
         try:
             # Check if YouTube
             if _is_youtube_url(url):
-                return await self.ingest_youtube(url, priority=priority)
+                return await self.ingest_youtube(
+                    url,
+                    priority=priority,
+                    project_id=project,
+                )
 
             # Fetch and extract
             text = await self._fetch_url_text(url)
@@ -270,7 +305,13 @@ class KnowledgeIngestService:
 
             chunks = 0
             if self._memory and hasattr(self._memory, "index_text"):
-                chunks = self._memory.index_text(text, f"web://{url}")
+                chunks = self._memory.index_text(
+                    text,
+                    f"web://{url}",
+                    project_id=project,
+                    source_type="web",
+                    source_trust=SourceTrust.UNTRUSTED_EXTERNAL,
+                )
 
             result.status = "success"
             result.chunks_created = chunks
@@ -278,7 +319,7 @@ class KnowledgeIngestService:
             result.priority = priority
 
             # Queue for deep learning
-            if priority == Priority.LOW:
+            if priority == Priority.LOW or self._home_lab_mode:
                 result.deep_learn_status = "skipped"
             else:
                 result.deep_learn_status = "queued"
@@ -288,6 +329,7 @@ class KnowledgeIngestService:
                     source=f"web://{url}",
                     priority=priority,
                     page_images=[],
+                    project_id=project,
                 )
                 self._queue.enqueue(item)
                 self._ensure_worker()
@@ -303,13 +345,17 @@ class KnowledgeIngestService:
         self,
         url: str,
         priority: Priority = Priority.NORMAL,
+        *,
+        project_id: str | None = None,
     ) -> IngestResult:
         """Ingest a YouTube video (extracts transcript/captions)."""
+        project = resolve_project_id(project_id)
         result = IngestResult(
             id=str(uuid4()),
             source_type="youtube",
             source_name=url,
             status="processing",
+            project_id=project,
         )
         try:
             video_id = _extract_youtube_id(url)
@@ -329,7 +375,13 @@ class KnowledgeIngestService:
 
             chunks = 0
             if self._memory and hasattr(self._memory, "index_text"):
-                chunks = self._memory.index_text(text, f"youtube://{video_id}")
+                chunks = self._memory.index_text(
+                    text,
+                    f"youtube://{video_id}",
+                    project_id=project,
+                    source_type="youtube",
+                    source_trust=SourceTrust.UNTRUSTED_EXTERNAL,
+                )
 
             result.status = "success"
             result.chunks_created = chunks
@@ -337,7 +389,7 @@ class KnowledgeIngestService:
             result.priority = priority
 
             # Queue for deep learning (with optional video frame extraction)
-            if priority == Priority.LOW:
+            if priority == Priority.LOW or self._home_lab_mode:
                 result.deep_learn_status = "skipped"
             else:
                 result.deep_learn_status = "queued"
@@ -348,6 +400,7 @@ class KnowledgeIngestService:
                     source=f"youtube://{video_id}",
                     priority=priority,
                     page_images=frames,
+                    project_id=project,
                 )
                 self._queue.enqueue(item)
                 self._ensure_worker()
@@ -676,19 +729,15 @@ class KnowledgeIngestService:
     async def _fetch_url_text(self, url: str) -> str:
         """Fetch and extract main text from a URL."""
         try:
-            import httpx
             import trafilatura
 
-            async with httpx.AsyncClient(
-                timeout=30,
-                follow_redirects=True,
-            ) as client:
-                resp = await client.get(
-                    url,
-                    headers={"User-Agent": "Cognithor/1.0"},
-                )
-                resp.raise_for_status()
-                html = resp.text
+            response = await fetch_public_http(
+                url,
+                headers={"User-Agent": "Cognithor/1.0"},
+                timeout_seconds=30,
+                max_bytes=2_000_000,
+            )
+            html = response.body.decode("utf-8", errors="replace")
             text = trafilatura.extract(
                 html,
                 include_comments=False,
@@ -697,34 +746,34 @@ class KnowledgeIngestService:
             return text or ""
         except ImportError:
             # Fallback without trafilatura
-            import httpx
-
-            async with httpx.AsyncClient(
-                timeout=30,
-                follow_redirects=True,
-            ) as client:
-                resp = await client.get(url)
-                return resp.text[:50000]
+            response = await fetch_public_http(
+                url,
+                headers={"User-Agent": "Cognithor/1.0"},
+                timeout_seconds=30,
+                max_bytes=2_000_000,
+            )
+            return response.body.decode("utf-8", errors="replace")[:50000]
         except Exception as exc:
-            log.warning("url_fetch_failed", url=url, error=str(exc))
+            log.warning(
+                "url_fetch_failed",
+                url=redact_url_for_log(url),
+                error=str(exc),
+            )
             return ""
 
     async def _fetch_youtube_transcript(self, video_id: str) -> str:
         """Fetch YouTube transcript via the free timedtext API."""
         try:
-            import httpx
-
             # Fetch YouTube page to extract captions track URL
             api_url = f"https://www.youtube.com/watch?v={video_id}"
-            async with httpx.AsyncClient(
-                timeout=30,
-                follow_redirects=True,
-            ) as client:
-                resp = await client.get(
-                    api_url,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                )
-                html = resp.text
+            response = await fetch_public_http(
+                api_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout_seconds=30,
+                max_bytes=2_000_000,
+                allowed_domains={"youtube.com"},
+            )
+            html = response.body.decode("utf-8", errors="replace")
 
             # Extract captions track URL from page source
             import re as _re
@@ -746,9 +795,14 @@ class KnowledgeIngestService:
             caption_url = match.group(1).replace("\\u0026", "&")
 
             # Fetch the captions XML
-            async with httpx.AsyncClient(timeout=15) as client:
-                cap_resp = await client.get(caption_url)
-                cap_xml = cap_resp.text
+            caption_response = await fetch_public_http(
+                caption_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout_seconds=15,
+                max_bytes=2_000_000,
+                allowed_domains={"youtube.com"},
+            )
+            cap_xml = caption_response.body.decode("utf-8", errors="replace")
 
             # Parse XML captions to plain text
             lines = []
@@ -778,22 +832,39 @@ class KnowledgeIngestService:
         """Return a copy of all ingestion results."""
         return list(self._results)
 
-    def stats(self) -> dict[str, Any]:
+    def results_for_project(self, project_id: str) -> list[IngestResult]:
+        """Return ingestion history within one deterministic project boundary."""
+        project = resolve_project_id(project_id)
+        return [result for result in self._results if result.project_id == project]
+
+    def stats(self, *, project_id: str | None = None) -> dict[str, Any]:
         """Return aggregate ingestion statistics."""
-        total = len(self._results)
-        success = sum(1 for r in self._results if r.status == "success")
+        results = (
+            self.results_for_project(project_id) if project_id is not None else list(self._results)
+        )
+        total = len(results)
+        success = sum(1 for r in results if r.status == "success")
         return {
             "total": total,
             "success": success,
             "failed": total - success,
-            "total_chunks": sum(r.chunks_created for r in self._results),
-            "total_text": sum(r.text_length for r in self._results),
+            "total_chunks": sum(r.chunks_created for r in results),
+            "total_text": sum(r.text_length for r in results),
         }
 
 
 def _is_youtube_url(url: str) -> bool:
     """Check if a URL is a YouTube URL."""
-    return bool(re.search(r"(youtube\.com|youtu\.be)", url, re.I))
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return False
+    hostname = parsed.hostname.rstrip(".").lower()
+    return hostname == "youtu.be" or hostname == "youtube.com" or hostname.endswith(".youtube.com")
 
 
 def _extract_youtube_id(url: str) -> str:

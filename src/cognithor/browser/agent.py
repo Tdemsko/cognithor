@@ -35,6 +35,7 @@ from cognithor.browser.types import (
     PageState,
     WorkflowStatus,
 )
+from cognithor.security.network_guard import install_playwright_public_egress_guard
 from cognithor.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -83,6 +84,7 @@ class BrowserAgent:
         self._workflows: dict[str, BrowserWorkflow] = {}
         self._page_states: dict[str, PageState] = {}
         self._console_messages: list[str] = []
+        self._network_resolver: Any = None
 
     @property
     def is_available(self) -> bool:
@@ -147,7 +149,12 @@ class BrowserAgent:
             if self._config.user_agent:
                 context_opts["user_agent"] = self._config.user_agent
 
+            context_opts["service_workers"] = "block"
             self._context = await self._browser.new_context(**context_opts)
+            await install_playwright_public_egress_guard(
+                self._context,
+                resolver=self._network_resolver,
+            )
 
             # Inject stealth JS on every new page
             if _stealth_available:
@@ -174,7 +181,7 @@ class BrowserAgent:
             return True
 
         except Exception as exc:
-            log.error("browser_start_failed", error=str(exc))
+            log.error("browser_start_failed", error_type=type(exc).__name__)
             await self._cleanup()
             return False
 

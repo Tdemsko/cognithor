@@ -3,7 +3,7 @@
 Fuehrt Shell-Befehle in einer isolierten Umgebung aus:
   - bubblewrap (bwrap): Linux-Namespaces, staerkste Isolation
   - firejail: Application Sandboxing, gute Isolation
-  - bare: Fallback ohne Sandbox (nur Timeout + Output-Limit)
+  - bare: Explicit local-administrator override only
 
 Der Gatekeeper blockiert destruktive Befehle VOR der Ausfuehrung.
 Die Sandbox isoliert die Ausfuehrung zusaetzlich auf OS-Level.
@@ -107,8 +107,15 @@ class ShellTools:
             workspace_dir=config.workspace_dir,
             default_timeout=self._default_timeout,
         )
+        _security_cfg = getattr(config, "security", None)
+        _home_lab_mode = bool(getattr(_security_cfg, "home_lab_mode", False))
+        _network_opt_in = bool(getattr(_security_cfg, "allow_sandbox_network", False))
+        _may_use_unrestricted_network = _network_opt_in and not _home_lab_mode
 
         if _ui_sandbox is not None:
+            sandbox_config.allow_bare_execution = bool(
+                getattr(_ui_sandbox, "allow_degraded_sandbox", False)
+            )
             # Memory limit from UI config
             _mem = getattr(_ui_sandbox, "max_memory_mb", None)
             if _mem and isinstance(_mem, int):
@@ -120,7 +127,11 @@ class ShellTools:
             # Network access from UI config
             _net = getattr(_ui_sandbox, "network_access", None)
             if _net is not None:
-                sandbox_config.network = NetworkPolicy.ALLOW if _net else NetworkPolicy.BLOCK
+                sandbox_config.network = (
+                    NetworkPolicy.ALLOW
+                    if _net and _may_use_unrestricted_network
+                    else NetworkPolicy.BLOCK
+                )
             # Sandbox level from UI config
             _level = getattr(_ui_sandbox, "level", None)
             if _level is not None:
@@ -140,7 +151,11 @@ class ShellTools:
 
         sandbox_network = getattr(config, "sandbox_network", None)
         if sandbox_network and sandbox_network in ("allow", "block"):
-            sandbox_config.network = NetworkPolicy(sandbox_network)
+            sandbox_config.network = (
+                NetworkPolicy.ALLOW
+                if sandbox_network == "allow" and _may_use_unrestricted_network
+                else NetworkPolicy.BLOCK
+            )
 
         self._sandbox = SandboxExecutor(sandbox_config)
         self._default_cwd = str(config.workspace_dir)
@@ -287,8 +302,18 @@ class ShellTools:
         # Per-Agent Overrides
         network_override = None
         if _sandbox_network:
-            with contextlib.suppress(ValueError):
+            try:
                 network_override = NetworkPolicy(_sandbox_network)
+            except ValueError:
+                return "Befehl blockiert: ungueltige Sandbox-Netzwerk-Policy."
+            if network_override == NetworkPolicy.ALLOW and (
+                getattr(self._config.security, "home_lab_mode", False)
+                or not getattr(self._config.security, "allow_sandbox_network", False)
+            ):
+                return (
+                    "Befehl blockiert: uneingeschraenkter Sandbox-Netzwerkzugriff "
+                    "ist im Home-Lab-Sicherheitsprofil deaktiviert."
+                )
 
         # Befehls-Logging: Kuerzen und sensitive Muster maskieren
         _log_cmd = command[: self._max_log_command_length]

@@ -759,7 +759,11 @@ class Gateway:
             self._reflector._confidence_manager = self._confidence_manager
 
         # Wire strategy_memory to planner (meta-reasoning hints)
-        if getattr(self, "_strategy_memory", None) and getattr(self, "_planner", None):
+        if (
+            getattr(self, "_strategy_memory", None)
+            and getattr(self, "_planner", None)
+            and getattr(self._config.security, "home_lab_mode", False) is not True
+        ):
             self._planner._strategy_memory = self._strategy_memory
 
         # Wire prompt_evolution LLM client (meta-prompt generation)
@@ -1053,15 +1057,19 @@ class Gateway:
             _proactive = 3
             if hasattr(self._config, "recovery"):
                 _proactive = getattr(self._config.recovery, "correction_proactive_threshold", 3)
-            self._correction_memory = CorrectionMemory(
-                db_path=self._config.cognithor_home / "corrections.db",
-                proactive_threshold=_proactive,
-            )
-            log.info("correction_memory_initialized")
-            # Wire into context pipeline
-            if hasattr(self, "_context_pipeline") and self._context_pipeline:
-                self._context_pipeline.set_correction_memory(self._correction_memory)
-                log.debug("correction_memory_wired_to_pipeline")
+            if getattr(self._config.security, "home_lab_mode", False) is True:
+                self._correction_memory = None
+                log.info("correction_memory_disabled_by_home_lab_profile")
+            else:
+                self._correction_memory = CorrectionMemory(
+                    db_path=self._config.cognithor_home / "corrections.db",
+                    proactive_threshold=_proactive,
+                )
+                log.info("correction_memory_initialized")
+                # Wire into context pipeline
+                if hasattr(self, "_context_pipeline") and self._context_pipeline:
+                    self._context_pipeline.set_correction_memory(self._correction_memory)
+                    log.debug("correction_memory_wired_to_pipeline")
         except Exception:
             log.debug("correction_memory_init_failed", exc_info=True)
             self._correction_memory = None
